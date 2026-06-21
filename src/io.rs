@@ -243,7 +243,7 @@ pub(crate) fn write_svg(path: &Path, svg: &str) -> Result<()> {
     fs::write(path, svg).with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// Percent-encode a compact SVG string for use as a `data:image/svg+xml;charset=utf-8,` URL.
+/// Percent-encode a compact SVG string for use as a `data:image/svg+xml,` URL.
 ///
 /// `%` is encoded first to prevent double-encoding subsequent replacements.
 pub(crate) fn svg_to_data_url(svg: &str) -> String {
@@ -254,7 +254,7 @@ pub(crate) fn svg_to_data_url(svg: &str) -> String {
         .replace('#', "%23")
         .replace('&', "%26")
         .replace('\n', "");
-    format!("data:image/svg+xml;charset=utf-8,{encoded}")
+    format!("data:image/svg+xml,{encoded}")
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -376,7 +376,7 @@ mod tests {
     fn svg_to_data_url_encodes_special_chars() {
         let url = svg_to_data_url("<svg><rect fill='#fff'/></svg>");
         assert!(
-            url.starts_with("data:image/svg+xml;charset=utf-8,"),
+            url.starts_with("data:image/svg+xml,"),
             "wrong prefix: {url}"
         );
         assert!(url.contains("%3C"), "< not encoded: {url}");

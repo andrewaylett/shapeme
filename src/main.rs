@@ -246,6 +246,11 @@ fn process(args: &ProcessArgs) -> Result<()> {
     let mut fb = vec![0u8; (width * height * 3) as usize];
     draw_shapes(&mut fb, width, height, &best_shapes);
 
+    let mut show_original = false;
+    let mut last_display_buf: Vec<u8> = best_blur
+        .map(|r| apply_blur(&fb, width, height, r))
+        .unwrap_or_else(|| fb.clone());
+
     if let Some(ctx) = &mut sdl_ctx {
         let blurred = best_blur.map(|r| apply_blur(&fb, width, height, r));
         let display = blurred.as_deref().unwrap_or(&fb);
@@ -349,9 +354,13 @@ fn process(args: &ProcessArgs) -> Result<()> {
             bestdiff = percdiff;
 
             if let Some(ctx) = &mut sdl_ctx {
-                let _ = ctx.texture.update(None, display_buf, (width * 3) as usize);
-                let _ = ctx.canvas.copy(&ctx.texture, None, None);
-                ctx.canvas.present();
+                last_display_buf.clear();
+                last_display_buf.extend_from_slice(display_buf);
+                if !show_original {
+                    let _ = ctx.texture.update(None, display_buf, (width * 3) as usize);
+                    let _ = ctx.canvas.copy(&ctx.texture, None, None);
+                    ctx.canvas.present();
+                }
             }
         }
 
@@ -373,6 +382,20 @@ fn process(args: &ProcessArgs) -> Result<()> {
                             print_data_url,
                         )?;
                         return Ok(());
+                    }
+                    Event::KeyDown {
+                        keycode: Some(Keycode::Space),
+                        ..
+                    } => {
+                        show_original = !show_original;
+                        let buf: &[u8] = if show_original {
+                            &config.image
+                        } else {
+                            &last_display_buf
+                        };
+                        let _ = ctx.texture.update(None, buf, (width * 3) as usize);
+                        let _ = ctx.canvas.copy(&ctx.texture, None, None);
+                        ctx.canvas.present();
                     }
                     _ => {}
                 }
