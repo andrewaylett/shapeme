@@ -300,27 +300,35 @@ fn process(args: &ProcessArgs) -> Result<()> {
             use_circles,
         );
 
-        let effective = if let Some(max_bytes) = config.max_bytes {
+        let (effective, effective_blur) = if let Some(max_bytes) = config.max_bytes {
             let mut s = candidate.active().to_vec();
+            let mut eff_blur = candidate.blur_radius;
             loop {
-                let svg = build_svg(&s, width, height, candidate.blur_radius, true);
+                let svg = build_svg(&s, width, height, eff_blur, true);
                 if svg_to_data_url(&svg).len() <= max_bytes || s.is_empty() {
                     break;
                 }
+                // Before dropping a shape, check whether removing blur alone brings us within budget.
+                // Shapes carry more localised visual information than a global blur filter.
+                if eff_blur.is_some() {
+                    let svg_no_blur = build_svg(&s, width, height, None, true);
+                    if svg_to_data_url(&svg_no_blur).len() <= max_bytes {
+                        eff_blur = None;
+                        break;
+                    }
+                }
                 s.pop();
             }
-            s
+            (s, eff_blur)
         } else {
-            candidate.active().to_vec()
+            (candidate.active().to_vec(), candidate.blur_radius)
         };
 
         fb.fill(0);
         draw_shapes(&mut fb, width, height, &effective);
 
         // Compute diff against the blurred framebuffer so the fitness function matches SVG output
-        let blurred_opt = candidate
-            .blur_radius
-            .map(|r| apply_blur(&fb, width, height, r));
+        let blurred_opt = effective_blur.map(|r| apply_blur(&fb, width, height, r));
         let display_buf: &[u8] = blurred_opt.as_deref().unwrap_or(&fb);
         let diff = compute_diff(&config.image, display_buf);
         let percdiff = diff as f32 / (width * height) as f32 / 442.0 * 100.0;
@@ -332,13 +340,13 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
         if accept {
             best_shapes = candidate.shapes;
-            best_blur = candidate.blur_radius;
+            best_blur = effective_blur;
 
             if percdiff < bestdiff {
                 absbest_shapes.clone_from(&effective);
-                absbest_blur = candidate.blur_radius;
+                absbest_blur = effective_blur;
                 state.absbestdiff = percdiff;
-                state.blur_radius = candidate.blur_radius;
+                state.blur_radius = effective_blur;
             }
 
             println!(
@@ -348,7 +356,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 state.max_shapes_incremental,
                 state.generation,
                 state.temperature,
-                candidate.blur_radius,
+                effective_blur,
             );
 
             bestdiff = percdiff;
