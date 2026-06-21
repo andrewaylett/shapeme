@@ -8,9 +8,7 @@ insert_final_newline = true
 trim_trailing_whitespace = true
 
 [*.rs]
-indent_size = 4
-tab_width = 4
-# rustfmt manages trailing whitespace in Rust files
+# rustfmt owns all Rust formatting; do not set indent_size or trailing whitespace here
 trim_trailing_whitespace = false
 
 [{*.yml,*.yaml}]

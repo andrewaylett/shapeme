@@ -11,6 +11,7 @@ repos:
   - id: check-added-large-files
   - id: mixed-line-ending
   - id: forbid-submodules
+  - id: check-xml
 - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
   rev: "2.7.3"
   hooks:
@@ -30,12 +31,20 @@ repos:
     entry: cargo update -w
     pass_filenames: false
     files: "Cargo\\.(lock|toml)"
+  # cargo-clippy runs via the system cargo rather than the andrewaylett Docker
+  # image, because that image lacks cmake and C++ required by the sdl2 bundled
+  # feature. The CI check job runs clippy separately with SARIF upload.
+  - id: cargo-clippy
+    name: Cargo Clippy
+    language: system
+    entry: cargo clippy
+    pass_filenames: false
+    types: [rust]
 - repo: https://github.com/andrewaylett/pre-commit-hooks
   rev: v0.7.0
   hooks:
   - id: init-hooks
   - id: cargo-fmt
-  - id: cargo-clippy
 - repo: https://github.com/google/yamlfmt
   rev: v0.17.2
   hooks:
