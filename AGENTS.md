@@ -9,11 +9,11 @@ for algorithm behaviour.
 
 | Module         | Responsibility                                                                     |
 | -------------- | ---------------------------------------------------------------------------------- |
-| `main.rs`      | CLI (clap), SDL2 init and event loop, annealing main loop                          |
-| `shapes.rs`    | `Shape` enum (Triangle/Circle), normalisation, mutation, random generation         |
-| `render.rs`    | Framebuffer drawing (`draw_hline`, `draw_triangle`, `draw_circle`), `compute_diff` |
-| `annealing.rs` | `AnnealingState`, `ShapeSet`, `mutate_shapes` (add/remove/swap/mutate)             |
-| `io.rs`        | PNG load (`image` crate), SVG save, binary checkpoint (`bincode` v2 + serde)       |
+| `main.rs`      | CLI (clap subcommands `setup`/`process`), SDL2 init and event loop, annealing main loop |
+| `shapes.rs`    | `Shape` enum (Triangle/Circle), normalisation, mutation, random generation               |
+| `render.rs`    | Framebuffer drawing (`draw_hline`, `draw_triangle`, `draw_circle`), `compute_diff`      |
+| `annealing.rs` | `AnnealingState`, `ShapeSet`, `mutate_shapes` (add/remove/swap/mutate/blur)             |
+| `io.rs`        | PNG load (`image` crate), SVG save, binary checkpoint (`bincode` v2 + serde)            |
 
 ## Key design decisions
 
@@ -38,11 +38,33 @@ The C code comment says "422" but the computation uses **442** (`width*height*44
 442 is the correct maximum per-pixel distance: `⌊√(255²×3)⌋ = 441`, rounded up
 to 442. The Rust port uses 442 and the comment corrects the original typo.
 
+### Setup/process split
+
+The CLI is split into two subcommands:
+
+- `shapeme setup <checkpoint> <input> --output-svg <path> [options]` — loads and scales the image
+  once, stores it with all config in a `StoredConfig` inside the checkpoint, then exits.
+- `shapeme process <checkpoint> [options]` — loads everything from the checkpoint and runs the
+  annealing loop. No image path or shape flags needed on repeated invocations.
+
+This means all run-to-run flags (triangles, circles, blur, max-shapes, etc.) are frozen at setup
+time and do not need to be repeated. `process --restart` re-initialises shapes and annealing state
+but keeps the stored config and image.
+
+### Evolved blur
+
+`blur_radius: Option<f32>` is a gene on `ShapeSet` (per-candidate) and `AnnealingState`
+(persisted absolute best). Each generation, `mutate_shapes` has a ~5% chance to nudge the blur
+radius up or down by up to 2.0, introduce it from `None`, or remove it when it drifts below 0.1.
+The SDL window and the diff computation both use the blurred framebuffer, matching SVG output.
+
 ### Binary checkpoint format
 
 Uses `bincode` v2 API (`bincode::serde::encode_to_vec` /
 `bincode::serde::decode_from_slice` with `bincode::config::standard()`).
-This is intentionally **incompatible** with the raw C struct format.
+This is intentionally **incompatible** with both the raw C struct format and checkpoints written
+before the `StoredConfig` field was added. Old checkpoints fail to decode with a message directing
+the user to run `shapeme setup`.
 
 ### Triangle normalisation
 

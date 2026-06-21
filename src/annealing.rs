@@ -10,6 +10,8 @@ pub(crate) struct AnnealingState {
     pub(crate) temperature: f32,
     pub(crate) absbestdiff: f32,
     pub(crate) generation: i64,
+    /// Blur radius of the current absolute best, evolved during the run and persisted in the checkpoint.
+    pub(crate) blur_radius: Option<f32>,
 }
 
 impl AnnealingState {
@@ -20,6 +22,7 @@ impl AnnealingState {
             temperature: 0.10,
             absbestdiff: 100.0,
             generation: 0,
+            blur_radius: None,
         }
     }
 }
@@ -27,6 +30,8 @@ impl AnnealingState {
 pub(crate) struct ShapeSet {
     pub(crate) shapes: Vec<Shape>,
     pub(crate) capacity: usize,
+    /// Per-candidate blur radius, mutated independently from the accepted best each generation.
+    pub(crate) blur_radius: Option<f32>,
 }
 
 impl ShapeSet {
@@ -34,6 +39,7 @@ impl ShapeSet {
         Self {
             shapes: Vec::with_capacity(capacity),
             capacity,
+            blur_radius: None,
         }
     }
 
@@ -94,6 +100,19 @@ pub(crate) fn mutate_shapes(
         if a != b {
             set.shapes.swap(a, b);
         }
+    }
+
+    // ~5% chance: nudge the blur radius so the algorithm can discover or remove blur organically
+    if rng.random_range(0..20u32) == 0 {
+        set.blur_radius = set.blur_radius.map_or(Some(0.5), |r| {
+            let delta = rng.random::<f32>() * 2.0;
+            let new_r = if rng.random_bool(0.5) {
+                r + delta
+            } else {
+                r - delta
+            };
+            if new_r < 0.1 { None } else { Some(new_r) }
+        });
     }
 
     // Mutate random shapes

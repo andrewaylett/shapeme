@@ -1,12 +1,32 @@
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use image::imageops::FilterType;
 
 use crate::annealing::AnnealingState;
 use crate::shapes::Shape;
+
+/// Configuration embedded in the checkpoint by `setup`. Carries everything `process` needs
+/// to reconstruct the run without any additional CLI flags.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct StoredConfig {
+    /// Scaled RGB24 pixel data (width × height × 3 bytes).
+    pub(crate) image: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) use_triangles: bool,
+    pub(crate) use_circles: bool,
+    pub(crate) mutation_rate: u32,
+    pub(crate) max_bytes: Option<usize>,
+    /// Default SVG output path; `process --output-svg` overrides this.
+    pub(crate) output_svg: PathBuf,
+    pub(crate) max_shapes: usize,
+    pub(crate) initial_shapes: usize,
+    /// User-supplied starting blur sigma; used to reset blur on `process --restart`.
+    pub(crate) initial_blur_radius: Option<f32>,
+}
 
 /// Load an image (any format supported by the image crate) and return it as an
 /// RGB24 byte buffer plus dimensions.
@@ -239,13 +259,20 @@ pub(crate) fn svg_to_data_url(svg: &str) -> String {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Checkpoint {
+    config: StoredConfig,
     state: AnnealingState,
     shapes: Vec<Shape>,
 }
 
-/// Save annealing state and shapes to a binary checkpoint file.
-pub(crate) fn save_binary(path: &Path, state: &AnnealingState, shapes: &[Shape]) -> Result<()> {
+/// Save config, annealing state and shapes to a binary checkpoint file.
+pub(crate) fn save_binary(
+    path: &Path,
+    config: &StoredConfig,
+    state: &AnnealingState,
+    shapes: &[Shape],
+) -> Result<()> {
     let checkpoint = Checkpoint {
+        config: config.clone(),
         state: state.clone(),
         shapes: shapes.to_vec(),
     };
@@ -255,17 +282,32 @@ pub(crate) fn save_binary(path: &Path, state: &AnnealingState, shapes: &[Shape])
     Ok(())
 }
 
-/// Load a binary checkpoint. Returns `None` if the file does not exist
-/// (fresh start). Fails on corrupt data.
-pub(crate) fn load_binary(path: &Path) -> Result<Option<(AnnealingState, Vec<Shape>)>> {
+/// Load a binary checkpoint. Returns `None` if the file does not exist (fresh start).
+///
+/// Fails with a clear message on corrupt or incompatible data — run `shapeme setup` to create
+/// a new checkpoint.
+pub(crate) fn load_binary(
+    path: &Path,
+) -> Result<Option<(StoredConfig, AnnealingState, Vec<Shape>)>> {
     if !path.exists() {
         return Ok(None);
     }
     let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let (checkpoint, _): (Checkpoint, _) =
-        bincode::serde::decode_from_slice(&data, bincode::config::standard())
-            .context("failed to decode checkpoint")?;
-    Ok(Some((checkpoint.state, checkpoint.shapes)))
+        bincode::serde::decode_from_slice(&data, bincode::config::standard()).with_context(
+            || {
+                format!(
+                    "failed to decode checkpoint at {} — run `shapeme setup` to create a new one",
+                    path.display()
+                )
+            },
+        )?;
+    let config = checkpoint.config;
+    anyhow::ensure!(
+        config.image.len() == (config.width * config.height * 3) as usize,
+        "checkpoint image dimensions do not match pixel data — run `shapeme setup` to recreate"
+    );
+    Ok(Some((config, checkpoint.state, checkpoint.shapes)))
 }
 
 #[cfg(test)]
