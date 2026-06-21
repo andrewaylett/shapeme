@@ -8,6 +8,7 @@ pub(crate) mod shapes;
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
@@ -203,6 +204,12 @@ fn setup(args: &SetupArgs) -> Result<()> {
     Ok(())
 }
 
+struct DisplayUpdate {
+    shapes: Vec<Shape>,
+    blur: Option<f32>,
+    diff: f32,
+}
+
 /// Result of a single parallel annealing batch.
 struct BatchResult {
     /// Monotone-best shapes seen during this batch.
@@ -213,6 +220,10 @@ struct BatchResult {
     state: AnnealingState,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "batch parameters, config reference, starting state, and progress channel are all necessary"
+)]
 fn run_batch(
     config: &StoredConfig,
     start_shapes: &[Shape],
@@ -220,6 +231,7 @@ fn run_batch(
     start_state: &AnnealingState,
     batch_size: u32,
     reheated: bool,
+    tx: &mpsc::Sender<DisplayUpdate>,
 ) -> BatchResult {
     let mut rng = SmallRng::from_os_rng();
     let mut fb = vec![0u8; (config.width * config.height * 3) as usize];
@@ -320,6 +332,11 @@ fn run_batch(
                 absbest_blur = effective_blur;
                 state.absbestdiff = percdiff;
                 state.blur_radius = effective_blur;
+                let _ = tx.send(DisplayUpdate {
+                    shapes: effective.clone(),
+                    blur: effective_blur,
+                    diff: percdiff,
+                });
             }
 
             bestdiff = percdiff;
@@ -342,6 +359,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
             checkpoint_path.display()
         );
     };
+    let config = Arc::new(config);
 
     let output_svg: &Path = args.output_svg.as_deref().unwrap_or(&config.output_svg);
 
@@ -407,19 +425,118 @@ fn process(args: &ProcessArgs) -> Result<()> {
         let round_blur = absbest_blur;
         let n_batches = args.parallel_batches;
 
-        let results: Vec<BatchResult> = (0..n_batches)
-            .into_par_iter()
-            .map(|i| {
-                run_batch(
-                    &config,
-                    &round_shapes,
-                    round_blur,
-                    &round_state,
-                    args.batch_size,
-                    n_batches > 1 && i + 1 == n_batches,
-                )
-            })
-            .collect();
+        let batch_size = args.batch_size;
+        let (tx, rx) = mpsc::channel::<DisplayUpdate>();
+        let config_arc = Arc::clone(&config);
+        let join_handle = std::thread::spawn(move || {
+            (0..n_batches)
+                .into_par_iter()
+                .map_with(tx, |tx_local, i| {
+                    run_batch(
+                        &config_arc,
+                        &round_shapes,
+                        round_blur,
+                        &round_state,
+                        batch_size,
+                        n_batches > 1 && i + 1 == n_batches,
+                        tx_local,
+                    )
+                })
+                .collect::<Vec<BatchResult>>()
+        });
+
+        let mut should_quit = false;
+        let mut round_display_diff = state.absbestdiff;
+
+        'round: loop {
+            while let Ok(update) = rx.try_recv() {
+                if update.diff < round_display_diff {
+                    round_display_diff = update.diff;
+                    if let Some(ctx) = &mut sdl_ctx {
+                        fb.fill(0);
+                        draw_shapes(&mut fb, width, height, &update.shapes);
+                        let blurred = update.blur.map(|r| apply_blur(&fb, width, height, r));
+                        let display = blurred.as_deref().unwrap_or(&fb);
+                        last_display_buf.clear();
+                        last_display_buf.extend_from_slice(display);
+                        if !show_original {
+                            let _ = ctx.texture.update(None, display, (width * 3) as usize);
+                            let _ = ctx.canvas.copy(&ctx.texture, None, None);
+                            ctx.canvas.present();
+                        }
+                    }
+                }
+            }
+
+            if let Some(ctx) = &mut sdl_ctx {
+                for event in ctx.event_pump.poll_iter() {
+                    match event {
+                        Event::Quit { .. }
+                        | Event::KeyDown {
+                            keycode: Some(Keycode::Q | Keycode::Escape),
+                            ..
+                        } => {
+                            should_quit = true;
+                            break 'round;
+                        }
+                        Event::KeyDown {
+                            keycode: Some(Keycode::Space),
+                            ..
+                        } => {
+                            show_original = !show_original;
+                            let buf: &[u8] = if show_original {
+                                &config.image
+                            } else {
+                                &last_display_buf
+                            };
+                            let _ = ctx.texture.update(None, buf, (width * 3) as usize);
+                            let _ = ctx.canvas.copy(&ctx.texture, None, None);
+                            ctx.canvas.present();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if join_handle.is_finished() {
+                while let Ok(update) = rx.try_recv() {
+                    if update.diff < round_display_diff {
+                        round_display_diff = update.diff;
+                        if let Some(ctx) = &mut sdl_ctx {
+                            fb.fill(0);
+                            draw_shapes(&mut fb, width, height, &update.shapes);
+                            let blurred = update.blur.map(|r| apply_blur(&fb, width, height, r));
+                            let display = blurred.as_deref().unwrap_or(&fb);
+                            last_display_buf.clear();
+                            last_display_buf.extend_from_slice(display);
+                            if !show_original {
+                                let _ = ctx.texture.update(None, display, (width * 3) as usize);
+                                let _ = ctx.canvas.copy(&ctx.texture, None, None);
+                                ctx.canvas.present();
+                            }
+                        }
+                    }
+                }
+                break 'round;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let results = join_handle.join().expect("worker thread panicked");
+
+        if should_quit {
+            finalize(
+                checkpoint_path,
+                &config,
+                output_svg,
+                &absbest_shapes,
+                absbest_blur,
+                &state,
+                print_data_url,
+            )?;
+            return Ok(());
+        }
 
         let winner = results
             .into_iter()
@@ -456,44 +573,6 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 let _ = ctx.texture.update(None, display, (width * 3) as usize);
                 let _ = ctx.canvas.copy(&ctx.texture, None, None);
                 ctx.canvas.present();
-            }
-        }
-
-        if let Some(ctx) = &mut sdl_ctx {
-            for event in ctx.event_pump.poll_iter() {
-                match event {
-                    Event::Quit { .. }
-                    | Event::KeyDown {
-                        keycode: Some(Keycode::Q | Keycode::Escape),
-                        ..
-                    } => {
-                        finalize(
-                            checkpoint_path,
-                            &config,
-                            output_svg,
-                            &absbest_shapes,
-                            absbest_blur,
-                            &state,
-                            print_data_url,
-                        )?;
-                        return Ok(());
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::Space),
-                        ..
-                    } => {
-                        show_original = !show_original;
-                        let buf: &[u8] = if show_original {
-                            &config.image
-                        } else {
-                            &last_display_buf
-                        };
-                        let _ = ctx.texture.update(None, buf, (width * 3) as usize);
-                        let _ = ctx.canvas.copy(&ctx.texture, None, None);
-                        ctx.canvas.present();
-                    }
-                    _ => {}
-                }
             }
         }
 
