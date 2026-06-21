@@ -1,0 +1,103 @@
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+
+use crate::shapes::{Shape, mutate_shape, random_shape, random_small_shape};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnnealingState {
+    pub max_shapes: usize,
+    pub max_shapes_incremental: usize,
+    pub temperature: f32,
+    pub absbestdiff: f32,
+    pub generation: i64,
+}
+
+impl AnnealingState {
+    pub fn new(max_shapes: usize, initial_shapes: usize) -> Self {
+        Self {
+            max_shapes,
+            max_shapes_incremental: initial_shapes,
+            temperature: 0.10,
+            absbestdiff: 100.0,
+            generation: 0,
+        }
+    }
+}
+
+pub struct ShapeSet {
+    pub shapes: Vec<Shape>,
+    pub capacity: usize,
+}
+
+impl ShapeSet {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            shapes: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn active(&self) -> &[Shape] {
+        &self.shapes
+    }
+
+    pub fn len(&self) -> usize {
+        self.shapes.len()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn mutate_shapes(
+    rng: &mut impl Rng,
+    set: &mut ShapeSet,
+    annealing: &AnnealingState,
+    width: u32,
+    height: u32,
+    mutation_rate: u32,
+    use_triangles: bool,
+    use_circles: bool,
+) {
+    // The C source hardcodes 10 mutation attempts per generation regardless
+    // of the number of shapes, so we match that here.
+    const MUTATION_ATTEMPTS: usize = 10;
+
+    // 10% chance: add a new shape
+    if rng.random_range(0..10u32) == 0
+        && set.len() < set.capacity
+        && set.len() < annealing.max_shapes_incremental
+    {
+        let new_shape = match rng.random_range(0..5u32) {
+            0 => random_shape(rng, width, height, use_triangles, use_circles),
+            1 => random_small_shape(rng, width, height, 5, use_triangles, use_circles),
+            2 => random_small_shape(rng, width, height, 10, use_triangles, use_circles),
+            3 => random_small_shape(rng, width, height, 25, use_triangles, use_circles),
+            _ => random_small_shape(rng, width, height, 2, use_triangles, use_circles),
+        };
+        set.shapes.push(new_shape);
+        return;
+    }
+
+    // 5% chance: remove a shape
+    if rng.random_range(0..20u32) == 0 && set.len() > 1 {
+        let idx = rng.random_range(0..set.len());
+        set.shapes.remove(idx);
+        return;
+    }
+
+    // 5% chance: swap two shapes
+    if rng.random_range(0..20u32) == 0 && set.len() >= 2 {
+        let a = rng.random_range(0..set.len());
+        let b = rng.random_range(0..set.len());
+        if a != b {
+            set.shapes.swap(a, b);
+        }
+    }
+
+    // Mutate random shapes
+    for _ in 0..MUTATION_ATTEMPTS {
+        let idx = rng.random_range(0..set.len());
+        if rng.random_range(0..1000u32) < mutation_rate {
+            mutate_shape(rng, &mut set.shapes[idx], width, height);
+        }
+    }
+}

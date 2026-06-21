@@ -1,0 +1,5 @@
+# CMake 4.x removed compatibility with cmake_minimum_required < 3.5.
+# The SDL2 source bundled by sdl2-sys predates this change, so we pass
+# the minimum policy version to cmake to allow the build to proceed.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

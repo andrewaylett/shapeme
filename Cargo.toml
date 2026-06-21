@@ -2,5 +2,17 @@
 name = "shapeme"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+license = "BSD-2-Clause"
+description = "Approximate images with triangles/circles via simulated annealing"
+authors = ["Andrew Aylett <andrew@aylett.co.uk>"]
+repository = "https://github.com/andrewaylett/shapeme"
 
 [dependencies]
+image = "0.25"
+sdl2 = { version = "0.37", features = ["bundled"] }
+rand = "0.9"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2", features = ["serde"] }
