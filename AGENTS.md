@@ -100,3 +100,20 @@ A candidate is accepted when:
 
 The second condition allows occasional uphill moves to escape local minima,
 controlled by a temperature that decays by 0.00001 every 10 generations.
+
+### Parallel annealing batches (Rayon)
+
+The annealing loop runs `--parallel-batches` (default 10) independent trajectories per *round*
+via Rayon, each running `--batch-size` (default 200) generations. All batches start from the
+current absolute-best shapes and annealing state; after every round the winner (lowest
+`absbestdiff`) is inherited as the new starting point.
+
+The last batch in each round is *re-heated* (temperature reset to 0.10) to enable large
+exploratory jumps that cold batches would reject. Re-heating only applies when
+`parallel_batches > 1`; a single-batch run is strictly serial.
+
+Generation count advances by `batch_size` per round (not `batch_size × parallel_batches`),
+so temperature decay reflects rounds-of-wall-time, not total candidate evaluations. Each
+batch allocates its own framebuffer and `SmallRng`; no shared mutable state is needed.
+
+SDL display and checkpoint saves happen on the main thread between rounds.

@@ -70,7 +70,7 @@ pub(crate) fn mutate_shapes(
     // of the number of shapes, so we match that here.
     const MUTATION_ATTEMPTS: usize = 10;
 
-    let margin = set.blur_radius.map(|r| r.ceil() as i16).unwrap_or(0);
+    let margin = set.blur_radius.map_or(0, |r| r.ceil() as i16);
 
     // 10% chance: add a new shape
     if rng.random_range(0..10u32) == 0

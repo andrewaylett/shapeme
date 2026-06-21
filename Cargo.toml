@@ -12,6 +12,7 @@ repository = "https://github.com/andrewaylett/shapeme"
 image = "0.25"
 sdl2 = { version = "0.37", features = ["bundled", "unsafe_textures"] }
 rand = "0.9"
+rayon = "1"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

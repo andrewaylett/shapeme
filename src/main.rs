@@ -6,6 +6,7 @@ pub(crate) mod io;
 pub(crate) mod render;
 pub(crate) mod shapes;
 
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -13,6 +14,7 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
+use rayon::prelude::*;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
@@ -98,6 +100,12 @@ struct ProcessArgs {
     /// Override the SVG output path stored in the checkpoint
     #[arg(long)]
     output_svg: Option<PathBuf>,
+    /// Generations to run per parallel batch per round
+    #[arg(long, default_value = "200")]
+    batch_size: u32,
+    /// Number of parallel batches per round
+    #[arg(long, default_value = "10")]
+    parallel_batches: usize,
 }
 
 /// SDL2 handles bundled together. Field order determines drop order:
@@ -195,82 +203,46 @@ fn setup(args: &SetupArgs) -> Result<()> {
     Ok(())
 }
 
-fn process(args: &ProcessArgs) -> Result<()> {
-    let checkpoint_path = &args.checkpoint;
+/// Result of a single parallel annealing batch.
+struct BatchResult {
+    /// Monotone-best shapes seen during this batch.
+    absbest_shapes: Vec<Shape>,
+    /// Blur radius corresponding to `absbest_shapes`.
+    absbest_blur: Option<f32>,
+    /// Full annealing state at batch end; `absbestdiff` is the lowest diff seen.
+    state: AnnealingState,
+}
 
-    let Some((config, mut state, saved_shapes)) = load_binary(checkpoint_path)? else {
-        anyhow::bail!(
-            "checkpoint {} not found — run `shapeme setup` to create one",
-            checkpoint_path.display()
-        );
-    };
+fn run_batch(
+    config: &StoredConfig,
+    start_shapes: &[Shape],
+    start_blur: Option<f32>,
+    start_state: &AnnealingState,
+    batch_size: u32,
+    reheated: bool,
+) -> BatchResult {
+    let mut rng = SmallRng::from_os_rng();
+    let mut fb = vec![0u8; (config.width * config.height * 3) as usize];
 
-    let output_svg: &Path = args.output_svg.as_deref().unwrap_or(&config.output_svg);
+    let mut state = start_state.clone();
+    if reheated {
+        state.temperature = 0.10;
+    }
 
-    let use_triangles = config.use_triangles;
-    let use_circles = config.use_circles;
-    let mutation_rate = config.mutation_rate.min(1000);
-    let max_shapes = config.max_shapes;
+    let mut best_shapes: Vec<Shape> = start_shapes.to_vec();
+    let mut best_blur: Option<f32> = start_blur;
+    let mut absbest_shapes: Vec<Shape> = start_shapes.to_vec();
+    let mut absbest_blur: Option<f32> = start_blur;
+    let mut bestdiff = state.absbestdiff;
+
     let width = config.width;
     let height = config.height;
+    let max_shapes = state.max_shapes;
+    let mutation_rate = config.mutation_rate.min(1000);
+    let use_triangles = config.use_triangles;
+    let use_circles = config.use_circles;
 
-    let mut sdl_ctx: Option<SdlCtx> = if args.headless {
-        None
-    } else {
-        Some(init_sdl(width, height)?)
-    };
-
-    let mut rng = SmallRng::from_os_rng();
-
-    // Determine starting shapes and blur: fresh start if restarting or no saved shapes yet
-    let (init_shapes, init_blur) = if args.restart || saved_shapes.is_empty() {
-        let margin = config.initial_blur_radius.map(|r| r.ceil() as i16).unwrap_or(0);
-        let shapes: Vec<Shape> = (0..config.initial_shapes)
-            .map(|_| random_shape(&mut rng, width, height, use_triangles, use_circles, margin))
-            .collect();
-        (shapes, config.initial_blur_radius)
-    } else {
-        let blur = state.blur_radius;
-        (saved_shapes, blur)
-    };
-
-    if args.restart {
-        state = AnnealingState::new(max_shapes, config.initial_shapes);
-    }
-    state.blur_radius = init_blur;
-
-    let mut best_shapes = init_shapes;
-    let mut best_blur: Option<f32> = init_blur;
-    let mut absbest_shapes = best_shapes.clone();
-    let mut absbest_blur: Option<f32> = init_blur;
-
-    let mut fb = vec![0u8; (width * height * 3) as usize];
-    draw_shapes(&mut fb, width, height, &best_shapes);
-
-    let mut show_original = false;
-    let mut last_display_buf: Vec<u8> = best_blur
-        .map(|r| apply_blur(&fb, width, height, r))
-        .unwrap_or_else(|| fb.clone());
-
-    if let Some(ctx) = &mut sdl_ctx {
-        let blurred = best_blur.map(|r| apply_blur(&fb, width, height, r));
-        let display = blurred.as_deref().unwrap_or(&fb);
-        let _ = ctx.texture.update(None, display, (width * 3) as usize);
-        let _ = ctx.canvas.copy(&ctx.texture, None, None);
-        ctx.canvas.present();
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let _ = ctx
-            .texture
-            .update(None, &config.image, (width * 3) as usize);
-        let _ = ctx.canvas.copy(&ctx.texture, None, None);
-        ctx.canvas.present();
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-
-    let mut bestdiff = state.absbestdiff;
-    let print_data_url = args.data_url || args.headless;
-
-    loop {
+    for _ in 0..batch_size {
         state.generation += 1;
 
         if state.temperature > 0.0 && state.generation % 10 == 0 {
@@ -350,26 +322,140 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 state.blur_radius = effective_blur;
             }
 
-            println!(
-                "Diff {:.4}% (shapes:{}, max:{}, gen:{}, temp:{:.5}, blur:{:?})",
-                percdiff,
-                effective.len(),
-                state.max_shapes_incremental,
-                state.generation,
-                state.temperature,
-                effective_blur,
-            );
-
             bestdiff = percdiff;
+        }
+    }
 
-            if let Some(ctx) = &mut sdl_ctx {
-                last_display_buf.clear();
-                last_display_buf.extend_from_slice(display_buf);
-                if !show_original {
-                    let _ = ctx.texture.update(None, display_buf, (width * 3) as usize);
-                    let _ = ctx.canvas.copy(&ctx.texture, None, None);
-                    ctx.canvas.present();
-                }
+    BatchResult {
+        absbest_shapes,
+        absbest_blur,
+        state,
+    }
+}
+
+fn process(args: &ProcessArgs) -> Result<()> {
+    let checkpoint_path = &args.checkpoint;
+
+    let Some((config, mut state, saved_shapes)) = load_binary(checkpoint_path)? else {
+        anyhow::bail!(
+            "checkpoint {} not found — run `shapeme setup` to create one",
+            checkpoint_path.display()
+        );
+    };
+
+    let output_svg: &Path = args.output_svg.as_deref().unwrap_or(&config.output_svg);
+
+    let use_triangles = config.use_triangles;
+    let use_circles = config.use_circles;
+    let width = config.width;
+    let height = config.height;
+
+    let mut sdl_ctx: Option<SdlCtx> = if args.headless {
+        None
+    } else {
+        Some(init_sdl(width, height)?)
+    };
+
+    // Determine starting shapes and blur: fresh start if restarting or no saved shapes yet
+    let (init_shapes, init_blur) = if args.restart || saved_shapes.is_empty() {
+        let mut rng = SmallRng::from_os_rng();
+        let margin = config.initial_blur_radius.map_or(0, |r| r.ceil() as i16);
+        let shapes: Vec<Shape> = (0..config.initial_shapes)
+            .map(|_| random_shape(&mut rng, width, height, use_triangles, use_circles, margin))
+            .collect();
+        (shapes, config.initial_blur_radius)
+    } else {
+        let blur = state.blur_radius;
+        (saved_shapes, blur)
+    };
+
+    if args.restart {
+        state = AnnealingState::new(config.max_shapes, config.initial_shapes);
+    }
+    state.blur_radius = init_blur;
+
+    let mut absbest_shapes: Vec<Shape> = init_shapes;
+    let mut absbest_blur: Option<f32> = init_blur;
+
+    let mut fb = vec![0u8; (width * height * 3) as usize];
+    draw_shapes(&mut fb, width, height, &absbest_shapes);
+
+    let mut show_original = false;
+    let mut last_display_buf: Vec<u8> =
+        absbest_blur.map_or_else(|| fb.clone(), |r| apply_blur(&fb, width, height, r));
+
+    if let Some(ctx) = &mut sdl_ctx {
+        let blurred = absbest_blur.map(|r| apply_blur(&fb, width, height, r));
+        let display = blurred.as_deref().unwrap_or(&fb);
+        let _ = ctx.texture.update(None, display, (width * 3) as usize);
+        let _ = ctx.canvas.copy(&ctx.texture, None, None);
+        ctx.canvas.present();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let _ = ctx
+            .texture
+            .update(None, &config.image, (width * 3) as usize);
+        let _ = ctx.canvas.copy(&ctx.texture, None, None);
+        ctx.canvas.present();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    let print_data_url = args.data_url || args.headless;
+
+    loop {
+        let round_state = state.clone();
+        let round_shapes = absbest_shapes.clone();
+        let round_blur = absbest_blur;
+        let n_batches = args.parallel_batches;
+
+        let results: Vec<BatchResult> = (0..n_batches)
+            .into_par_iter()
+            .map(|i| {
+                run_batch(
+                    &config,
+                    &round_shapes,
+                    round_blur,
+                    &round_state,
+                    args.batch_size,
+                    n_batches > 1 && i + 1 == n_batches,
+                )
+            })
+            .collect();
+
+        let winner = results
+            .into_iter()
+            .min_by(|a, b| {
+                a.state
+                    .absbestdiff
+                    .partial_cmp(&b.state.absbestdiff)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .expect("parallel_batches > 0");
+
+        state = winner.state;
+        absbest_shapes = winner.absbest_shapes;
+        absbest_blur = winner.absbest_blur;
+
+        println!(
+            "Diff {:.4}% (shapes:{}, max:{}, gen:{}, temp:{:.5}, blur:{:?})",
+            state.absbestdiff,
+            absbest_shapes.len(),
+            state.max_shapes_incremental,
+            state.generation,
+            state.temperature,
+            absbest_blur,
+        );
+
+        if let Some(ctx) = &mut sdl_ctx {
+            fb.fill(0);
+            draw_shapes(&mut fb, width, height, &absbest_shapes);
+            let blurred = absbest_blur.map(|r| apply_blur(&fb, width, height, r));
+            let display = blurred.as_deref().unwrap_or(&fb);
+            last_display_buf.clear();
+            last_display_buf.extend_from_slice(display);
+            if !show_original {
+                let _ = ctx.texture.update(None, display, (width * 3) as usize);
+                let _ = ctx.canvas.copy(&ctx.texture, None, None);
+                ctx.canvas.present();
             }
         }
 
@@ -430,13 +516,11 @@ fn process(args: &ProcessArgs) -> Result<()> {
             }
         }
 
-        if state.generation % 100 == 0 {
-            write_svg(
-                output_svg,
-                &build_svg(&absbest_shapes, width, height, absbest_blur, false),
-            )?;
-            save_binary(checkpoint_path, &config, &state, &absbest_shapes)?;
-        }
+        write_svg(
+            output_svg,
+            &build_svg(&absbest_shapes, width, height, absbest_blur, false),
+        )?;
+        save_binary(checkpoint_path, &config, &state, &absbest_shapes)?;
     }
 }
 
