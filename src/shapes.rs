@@ -33,11 +33,11 @@ fn rand_between(rng: &mut impl Rng, min: i32, max: i32) -> i32 {
     rng.random_range(min..=max)
 }
 
-fn clamp_coord(v: i16, max: i16) -> i16 {
-    v.clamp(0, max - 1)
+fn clamp_coord(v: i16, min: i16, max: i16) -> i16 {
+    v.clamp(min, max)
 }
 
-fn normalize(shape: &mut Shape, width: u32, height: u32) {
+fn normalize(shape: &mut Shape, width: u32, height: u32, margin: i16) {
     let w = width as i16;
     let h = height as i16;
     match shape {
@@ -67,17 +67,21 @@ fn normalize(shape: &mut Shape, width: u32, height: u32) {
                     break;
                 }
             }
-            *x1 = clamp_coord(*x1, w);
-            *y1 = clamp_coord(*y1, h);
-            *x2 = clamp_coord(*x2, w);
-            *y2 = clamp_coord(*y2, h);
-            *x3 = clamp_coord(*x3, w);
-            *y3 = clamp_coord(*y3, h);
+            *x1 = clamp_coord(*x1, -margin, w - 1 + margin);
+            *y1 = clamp_coord(*y1, -margin, h - 1 + margin);
+            *x2 = clamp_coord(*x2, -margin, w - 1 + margin);
+            *y2 = clamp_coord(*y2, -margin, h - 1 + margin);
+            *x3 = clamp_coord(*x3, -margin, w - 1 + margin);
+            *y3 = clamp_coord(*y3, -margin, h - 1 + margin);
         }
         Shape::Circle { cx, cy, radius, .. } => {
-            *cx = clamp_coord(*cx, w);
-            *cy = clamp_coord(*cy, h);
-            while *cx - *radius < 0 || *cx + *radius >= w || *cy - *radius < 0 || *cy + *radius >= h
+            *cx = clamp_coord(*cx, -margin, w - 1 + margin);
+            *cy = clamp_coord(*cy, -margin, h - 1 + margin);
+            while *radius > 0
+                && (*cx - *radius < -margin
+                    || *cx + *radius >= w + margin
+                    || *cy - *radius < -margin
+                    || *cy + *radius >= h + margin)
             {
                 *radius -= 1;
             }
@@ -107,6 +111,7 @@ pub(crate) fn random_shape(
     height: u32,
     use_triangles: bool,
     use_circles: bool,
+    margin: i16,
 ) -> Shape {
     let is_triangle = select_shape_type(rng, use_triangles, use_circles);
     let (r, g, b, alpha) = random_color(rng);
@@ -134,7 +139,7 @@ pub(crate) fn random_shape(
             alpha,
         }
     };
-    normalize(&mut shape, width, height);
+    normalize(&mut shape, width, height, margin);
     shape
 }
 
@@ -145,6 +150,7 @@ pub(crate) fn random_small_shape(
     delta: i32,
     use_triangles: bool,
     use_circles: bool,
+    margin: i16,
 ) -> Shape {
     let is_triangle = select_shape_type(rng, use_triangles, use_circles);
     let x = (rng.random::<u32>() % width) as i32;
@@ -174,11 +180,17 @@ pub(crate) fn random_small_shape(
             alpha,
         }
     };
-    normalize(&mut shape, width, height);
+    normalize(&mut shape, width, height, margin);
     shape
 }
 
-pub(crate) fn mutate_shape(rng: &mut impl Rng, shape: &mut Shape, width: u32, height: u32) {
+pub(crate) fn mutate_shape(
+    rng: &mut impl Rng,
+    shape: &mut Shape,
+    width: u32,
+    height: u32,
+    margin: i16,
+) {
     let choice = rng.random_range(0..6u32);
     match shape {
         Shape::Triangle {
@@ -201,7 +213,7 @@ pub(crate) fn mutate_shape(rng: &mut impl Rng, shape: &mut Shape, width: u32, he
                 *y2 = (rng.random::<u32>() % height) as i16;
                 *x3 = (rng.random::<u32>() % width) as i16;
                 *y3 = (rng.random::<u32>() % height) as i16;
-                normalize(shape, width, height);
+                normalize(shape, width, height, margin);
             }
             1 => {
                 *x1 = x1.saturating_add(rand_between(rng, -20, 20) as i16);
@@ -210,7 +222,7 @@ pub(crate) fn mutate_shape(rng: &mut impl Rng, shape: &mut Shape, width: u32, he
                 *y2 = y2.saturating_add(rand_between(rng, -20, 20) as i16);
                 *x3 = x3.saturating_add(rand_between(rng, -20, 20) as i16);
                 *y3 = y3.saturating_add(rand_between(rng, -20, 20) as i16);
-                normalize(shape, width, height);
+                normalize(shape, width, height, margin);
             }
             2 => {
                 *x1 = x1.saturating_add(rand_between(rng, -5, 5) as i16);
@@ -219,7 +231,7 @@ pub(crate) fn mutate_shape(rng: &mut impl Rng, shape: &mut Shape, width: u32, he
                 *y2 = y2.saturating_add(rand_between(rng, -5, 5) as i16);
                 *x3 = x3.saturating_add(rand_between(rng, -5, 5) as i16);
                 *y3 = y3.saturating_add(rand_between(rng, -5, 5) as i16);
-                normalize(shape, width, height);
+                normalize(shape, width, height, margin);
             }
             3 => {
                 *r = rng.random();
@@ -248,19 +260,19 @@ pub(crate) fn mutate_shape(rng: &mut impl Rng, shape: &mut Shape, width: u32, he
                 *cx = (rng.random::<u32>() % width) as i16;
                 *cy = (rng.random::<u32>() % height) as i16;
                 *radius = (rng.random::<u32>() % width) as i16;
-                normalize(shape, width, height);
+                normalize(shape, width, height, margin);
             }
             1 => {
                 *cx = cx.saturating_add(rand_between(rng, -20, 20) as i16);
                 *cy = cy.saturating_add(rand_between(rng, -20, 20) as i16);
                 *radius = radius.saturating_add(rand_between(rng, -20, 20) as i16);
-                normalize(shape, width, height);
+                normalize(shape, width, height, margin);
             }
             2 => {
                 *cx = cx.saturating_add(rand_between(rng, -5, 5) as i16);
                 *cy = cy.saturating_add(rand_between(rng, -5, 5) as i16);
                 *radius = radius.saturating_add(rand_between(rng, -5, 5) as i16);
-                normalize(shape, width, height);
+                normalize(shape, width, height, margin);
             }
             3 => {
                 *r = rng.random();
@@ -303,7 +315,7 @@ mod tests {
             b: 0,
             alpha: 50,
         };
-        normalize(&mut shape, 100, 100);
+        normalize(&mut shape, 100, 100, 0);
         if let Shape::Triangle { y1, y2, y3, .. } = shape {
             assert!(
                 y1 <= y2 && y2 <= y3,
@@ -325,7 +337,7 @@ mod tests {
             b: 0,
             alpha: 50,
         };
-        normalize(&mut shape, 50, 50);
+        normalize(&mut shape, 50, 50, 0);
         if let Shape::Circle { cx, cy, radius, .. } = shape {
             assert!(cx - radius >= 0);
             assert!(cx + radius < 50);
@@ -352,13 +364,43 @@ mod tests {
             alpha: 50,
         };
         for _ in 0..1000 {
-            mutate_shape(&mut rng, &mut shape, 100, 100);
+            mutate_shape(&mut rng, &mut shape, 100, 100, 0);
             if let Shape::Triangle { alpha, .. } = shape {
                 assert!(
                     (MINALPHA..=MAXALPHA).contains(&alpha),
                     "alpha {alpha} out of bounds"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn normalise_with_margin_allows_coords_outside_image() {
+        let margin: i16 = 10;
+        // A triangle vertex just outside the old bound should be preserved when margin is set.
+        let mut shape = Shape::Triangle {
+            x1: -5,
+            y1: -5,
+            x2: 104,
+            y2: 5,
+            x3: 5,
+            y3: 104,
+            r: 0,
+            g: 0,
+            b: 0,
+            alpha: 50,
+        };
+        normalize(&mut shape, 100, 100, margin);
+        if let Shape::Triangle { x1, y1, x2, y2, x3, y3, .. } = shape {
+            assert_eq!(x1, -5, "x1 within margin should be unchanged");
+            assert_eq!(y1, -5, "y1 within margin should be unchanged");
+            assert_eq!(x2, 104, "x2 within margin should be unchanged");
+            assert_eq!(x3, 5, "x3 in-bounds should be unchanged");
+            assert_eq!(y3, 104, "y3 within margin should be unchanged");
+            // y-sort: -5 <= 5 <= 104 after the sort
+            assert!(y1 <= y2 && y2 <= y3, "y values must be non-decreasing");
+        } else {
+            panic!("expected Triangle");
         }
     }
 }

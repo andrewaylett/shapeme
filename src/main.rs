@@ -224,8 +224,9 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
     // Determine starting shapes and blur: fresh start if restarting or no saved shapes yet
     let (init_shapes, init_blur) = if args.restart || saved_shapes.is_empty() {
+        let margin = config.initial_blur_radius.map(|r| r.ceil() as i16).unwrap_or(0);
         let shapes: Vec<Shape> = (0..config.initial_shapes)
-            .map(|_| random_shape(&mut rng, width, height, use_triangles, use_circles))
+            .map(|_| random_shape(&mut rng, width, height, use_triangles, use_circles, margin))
             .collect();
         (shapes, config.initial_blur_radius)
     } else {

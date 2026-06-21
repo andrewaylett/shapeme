@@ -70,17 +70,19 @@ pub(crate) fn mutate_shapes(
     // of the number of shapes, so we match that here.
     const MUTATION_ATTEMPTS: usize = 10;
 
+    let margin = set.blur_radius.map(|r| r.ceil() as i16).unwrap_or(0);
+
     // 10% chance: add a new shape
     if rng.random_range(0..10u32) == 0
         && set.len() < set.capacity
         && set.len() < annealing.max_shapes_incremental
     {
         let new_shape = match rng.random_range(0..5u32) {
-            0 => random_shape(rng, width, height, use_triangles, use_circles),
-            1 => random_small_shape(rng, width, height, 5, use_triangles, use_circles),
-            2 => random_small_shape(rng, width, height, 10, use_triangles, use_circles),
-            3 => random_small_shape(rng, width, height, 25, use_triangles, use_circles),
-            _ => random_small_shape(rng, width, height, 2, use_triangles, use_circles),
+            0 => random_shape(rng, width, height, use_triangles, use_circles, margin),
+            1 => random_small_shape(rng, width, height, 5, use_triangles, use_circles, margin),
+            2 => random_small_shape(rng, width, height, 10, use_triangles, use_circles, margin),
+            3 => random_small_shape(rng, width, height, 25, use_triangles, use_circles, margin),
+            _ => random_small_shape(rng, width, height, 2, use_triangles, use_circles, margin),
         };
         set.shapes.push(new_shape);
         return;
@@ -119,7 +121,7 @@ pub(crate) fn mutate_shapes(
     for _ in 0..MUTATION_ATTEMPTS {
         let idx = rng.random_range(0..set.len());
         if rng.random_range(0..1000u32) < mutation_rate {
-            mutate_shape(rng, &mut set.shapes[idx], width, height);
+            mutate_shape(rng, &mut set.shapes[idx], width, height, margin);
         }
     }
 }

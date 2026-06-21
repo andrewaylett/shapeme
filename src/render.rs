@@ -26,11 +26,13 @@ fn draw_hline(
     if x1 > x2 {
         std::mem::swap(&mut x1, &mut x2);
     }
-    let x1 = x1.max(0) as u32;
-    let x2 = x2.min(width as i32 - 1) as u32;
+    let x1 = x1.max(0);
+    let x2 = x2.min(width as i32 - 1);
     if x1 > x2 {
         return;
     }
+    let x1 = x1 as u32;
+    let x2 = x2 as u32;
     let ar = alpha * r as f32;
     let ag = alpha * g as f32;
     let ab = alpha * b as f32;
@@ -273,5 +275,15 @@ mod tests {
         draw_hline(&mut fb, 10, 10, 0, 9, -1, 255, 0, 0, 1.0);
         draw_hline(&mut fb, 10, 10, 0, 9, 10, 255, 0, 0, 1.0);
         assert_eq!(fb, before, "out-of-bounds y must not write to framebuffer");
+    }
+
+    #[test]
+    fn draw_hline_entirely_left_of_viewport_noop() {
+        let mut fb = vec![0u8; 300]; // 10×10 RGB
+        let before = fb.clone();
+        // Both x values negative — span is entirely off-screen to the left.
+        // Casting a negative x2 to u32 wraps to a huge index; this must not panic.
+        draw_hline(&mut fb, 10, 10, -5, -1, 5, 255, 0, 0, 1.0);
+        assert_eq!(fb, before, "entirely off-screen-left span must not write to framebuffer");
     }
 }
