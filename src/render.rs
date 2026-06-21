@@ -1,9 +1,14 @@
+use image::{ImageBuffer, Rgb, imageops};
+
 use crate::shapes::Shape;
 
 /// Draw a horizontal span into an RGB24 framebuffer with alpha blending.
 /// Out-of-bounds y is silently ignored; x coordinates are clamped to the row.
-#[allow(clippy::too_many_arguments)]
-pub fn draw_hline(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pixel coordinate + colour + alpha parameters are unavoidable in a rasterizer"
+)]
+fn draw_hline(
     fb: &mut [u8],
     width: u32,
     height: u32,
@@ -39,8 +44,11 @@ pub fn draw_hline(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn draw_circle(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pixel coordinate + colour + alpha parameters are unavoidable in a rasterizer"
+)]
+fn draw_circle(
     fb: &mut [u8],
     width: u32,
     height: u32,
@@ -66,8 +74,11 @@ pub fn draw_circle(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn draw_triangle(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pixel coordinate + colour + alpha parameters are unavoidable in a rasterizer"
+)]
+fn draw_triangle(
     fb: &mut [u8],
     width: u32,
     height: u32,
@@ -147,7 +158,7 @@ pub fn draw_triangle(
     }
 }
 
-pub fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
+pub(crate) fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
     for shape in shapes {
         match *shape {
             Shape::Triangle {
@@ -204,11 +215,18 @@ pub fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
     }
 }
 
+/// Apply a Gaussian blur (sigma = `radius`) to an RGB24 framebuffer.
+pub(crate) fn apply_blur(fb: &[u8], width: u32, height: u32, radius: f32) -> Vec<u8> {
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_raw(width, height, fb.to_vec())
+        .expect("framebuffer dimensions must match pixel data");
+    imageops::blur(&img, radius).into_raw()
+}
+
 /// Sum of per-pixel Euclidean RGB distances between two RGB24 buffers.
 /// Max per-pixel distance is sqrt(255²×3) ≈ 441.67, capped at 442 in
 /// percentage calculations. (The original C comment said 422, which was
 /// a typo; the code correctly used 442.)
-pub fn compute_diff(a: &[u8], b: &[u8]) -> i64 {
+pub(crate) fn compute_diff(a: &[u8], b: &[u8]) -> i64 {
     assert_eq!(a.len(), b.len());
     let mut total: i64 = 0;
     let chunks = a.len() / 3;
@@ -239,6 +257,13 @@ mod tests {
         let pixels = 300 / 3;
         let per_pixel = ((255i64 * 255 * 3) as f64).sqrt() as i64;
         assert_eq!(compute_diff(&black, &white), per_pixel * pixels as i64);
+    }
+
+    #[test]
+    fn apply_blur_preserves_buffer_length() {
+        let pixels = vec![128u8; 30 * 30 * 3];
+        let blurred = apply_blur(&pixels, 30, 30, 2.0);
+        assert_eq!(blurred.len(), pixels.len());
     }
 
     #[test]

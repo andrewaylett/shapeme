@@ -10,9 +10,44 @@ repository = "https://github.com/andrewaylett/shapeme"
 
 [dependencies]
 image = "0.25"
-sdl2 = { version = "0.37", features = ["bundled"] }
+sdl2 = { version = "0.37", features = ["bundled", "unsafe_textures"] }
 rand = "0.9"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
+
+[lints.rust]
+dead_code       = "deny"
+missing_docs    = "deny"
+unreachable_pub = "warn"
+unused_imports  = "deny"
+
+[lints.clippy]
+# Lint groups (lower priority so individual overrides take effect)
+all      = { level = "deny", priority = -3 }
+pedantic = { level = "deny", priority = -2 }
+nursery  = { level = "deny", priority = -1 }
+# Selected restriction lints
+allow_attributes_without_reason = "deny"
+unwrap_used                      = "deny"
+# Project-wide allowances
+missing_panics_doc      = "allow"  # stubs use todo!() which panics; revisit once implemented
+module_name_repetitions = "allow"  # conventional for re-exported types (e.g. dkim::DkimSignature)
+wildcard_imports        = "allow"  # idiomatic in test modules (use super::*)
+# Graphics/rasterisation math: deliberate numeric conversions are pervasive
+cast_precision_loss      = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss           = "allow"
+cast_possible_wrap       = "allow"
+cast_lossless            = "allow"
+# Rasterisation-loop style conventions
+many_single_char_names   = "allow"  # r, g, b colour components use conventional short names
+while_float              = "allow"  # triangle rasteriser uses float loop counters
+suboptimal_flops         = "allow"  # explicit multiply-add is clearer than mul_add in graphics code
+missing_const_for_fn     = "allow"  # not every potentially-const function benefits from being const
+useless_let_if_seq       = "allow"  # named bindings aid readability in multi-step initialisations
+too_many_lines           = "allow"  # some functions (main, mutate_shapes) are necessarily long
+# Binary-crate visibility: pub(crate) is preferred over pub for crate-internal items
+# even though all modules are implicitly private in a binary crate
+redundant_pub_crate      = "allow"

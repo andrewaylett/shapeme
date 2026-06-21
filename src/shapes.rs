@@ -1,11 +1,11 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-pub const MINALPHA: u8 = 1;
-pub const MAXALPHA: u8 = 100;
+pub(crate) const MINALPHA: u8 = 1;
+pub(crate) const MAXALPHA: u8 = 100;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Shape {
+pub(crate) enum Shape {
     Triangle {
         x1: i16,
         y1: i16,
@@ -37,7 +37,7 @@ fn clamp_coord(v: i16, max: i16) -> i16 {
     v.clamp(0, max - 1)
 }
 
-pub fn normalize(shape: &mut Shape, width: u32, height: u32) {
+fn normalize(shape: &mut Shape, width: u32, height: u32) {
     let w = width as i16;
     let h = height as i16;
     match shape {
@@ -101,7 +101,7 @@ fn random_color(rng: &mut impl Rng) -> (u8, u8, u8, u8) {
     (r, g, b, alpha)
 }
 
-pub fn random_shape(
+pub(crate) fn random_shape(
     rng: &mut impl Rng,
     width: u32,
     height: u32,
@@ -138,7 +138,7 @@ pub fn random_shape(
     shape
 }
 
-pub fn random_small_shape(
+pub(crate) fn random_small_shape(
     rng: &mut impl Rng,
     width: u32,
     height: u32,
@@ -178,7 +178,7 @@ pub fn random_small_shape(
     shape
 }
 
-pub fn mutate_shape(rng: &mut impl Rng, shape: &mut Shape, width: u32, height: u32) {
+pub(crate) fn mutate_shape(rng: &mut impl Rng, shape: &mut Shape, width: u32, height: u32) {
     let choice = rng.random_range(0..6u32);
     match shape {
         Shape::Triangle {
