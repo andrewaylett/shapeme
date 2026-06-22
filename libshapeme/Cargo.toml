@@ -1,0 +1,20 @@
+[package]
+name = "libshapeme"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Core algorithm library for shapeme — image approximation via simulated annealing"
+
+[lints]
+workspace = true
+
+[dependencies]
+image = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+tracing = { workspace = true }

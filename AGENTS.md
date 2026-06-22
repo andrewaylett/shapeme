@@ -5,15 +5,26 @@ annealing image approximation tool. The original C source lives at
 `/Users/axa/dev/native/shapeme/shapeme.c` and is the authoritative reference
 for algorithm behaviour.
 
+## Workspace layout
+
+The repository is a Cargo workspace with two crates:
+
+- **`libshapeme/`** — core algorithm library. Works on in-memory state only; no file I/O,
+  no console output, no SDL2. Uses `tracing` for debug/trace logging.
+- **`shapeme/`** — CLI binary. Owns all file I/O, SDL2 UI, CLI argument parsing, and
+  the `tracing-subscriber` initialisation.
+
+The dividing line: _file access in the binary, the library works on state_.
+
 ## Architecture
 
-| Module         | Responsibility                                                                     |
-| -------------- | ---------------------------------------------------------------------------------- |
-| `main.rs`      | CLI (clap subcommands `setup`/`process`), SDL2 init and event loop, annealing main loop |
-| `shapes.rs`    | `Shape` enum (Triangle/Circle), normalisation, mutation, random generation               |
-| `render.rs`    | Framebuffer drawing (`draw_hline`, `draw_triangle`, `draw_circle`), `compute_diff`      |
-| `annealing.rs` | `AnnealingState`, `ShapeSet`, `mutate_shapes` (add/remove/swap/mutate/blur)             |
-| `io.rs`        | PNG load (`image` crate), SVG save, binary checkpoint (`bincode` v2 + serde)            |
+| Crate / Module          | Responsibility                                                                   |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `libshapeme::shapes`    | `Shape` enum (Triangle/Circle), normalisation, mutation, random generation       |
+| `libshapeme::render`    | Framebuffer rasterisation, `apply_blur`, `compute_diff`, `scale_image`           |
+| `libshapeme::annealing` | `AnnealingState`, `ShapeSet`, `mutate_shapes` (add/remove/swap/mutate/blur)      |
+| `libshapeme::svg`       | `build_svg`, `svg_to_data_url` (no file writes)                                  |
+| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O |
 
 ## Key design decisions
 
@@ -103,12 +114,12 @@ controlled by a temperature that decays by 0.00001 every 10 generations.
 
 ### Parallel annealing batches (Rayon)
 
-The annealing loop runs `--parallel-batches` (default 10) independent trajectories per *round*
+The annealing loop runs `--parallel-batches` (default 10) independent trajectories per _round_
 via Rayon, each running `--batch-size` (default 200) generations. All batches start from the
 current absolute-best shapes and annealing state; after every round the winner (lowest
 `absbestdiff`) is inherited as the new starting point.
 
-The last batch in each round is *re-heated* (temperature reset to 0.10) to enable large
+The last batch in each round is _re-heated_ (temperature reset to 0.10) to enable large
 exploratory jumps that cold batches would reject. Re-heating only applies when
 `parallel_batches > 1`; a single-batch run is strictly serial.
 

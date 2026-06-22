@@ -160,7 +160,8 @@ fn draw_triangle(
     }
 }
 
-pub(crate) fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
+/// Rasterise a slice of shapes into an RGB24 framebuffer.
+pub fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
     for shape in shapes {
         match *shape {
             Shape::Triangle {
@@ -218,17 +219,20 @@ pub(crate) fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shap
 }
 
 /// Apply a Gaussian blur (sigma = `radius`) to an RGB24 framebuffer.
-pub(crate) fn apply_blur(fb: &[u8], width: u32, height: u32, radius: f32) -> Vec<u8> {
+#[must_use]
+pub fn apply_blur(fb: &[u8], width: u32, height: u32, radius: f32) -> Vec<u8> {
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_raw(width, height, fb.to_vec())
         .expect("framebuffer dimensions must match pixel data");
     imageops::blur(&img, radius).into_raw()
 }
 
 /// Sum of per-pixel Euclidean RGB distances between two RGB24 buffers.
+///
 /// Max per-pixel distance is sqrt(255²×3) ≈ 441.67, capped at 442 in
 /// percentage calculations. (The original C comment said 422, which was
 /// a typo; the code correctly used 442.)
-pub(crate) fn compute_diff(a: &[u8], b: &[u8]) -> i64 {
+#[must_use]
+pub fn compute_diff(a: &[u8], b: &[u8]) -> i64 {
     assert_eq!(a.len(), b.len());
     let mut total: i64 = 0;
     let chunks = a.len() / 3;
@@ -240,6 +244,35 @@ pub(crate) fn compute_diff(a: &[u8], b: &[u8]) -> i64 {
         total += ((dr * dr + dg * dg + db * db) as f64).sqrt() as i64;
     }
     total
+}
+
+/// Downsample `pixels` so that `max(width, height)` ≤ `max_dim` using Lanczos3 resampling.
+/// Returns unchanged if already within the limit.
+#[must_use]
+pub fn scale_image(pixels: Vec<u8>, width: u32, height: u32, max_dim: u32) -> (Vec<u8>, u32, u32) {
+    if width.max(height) <= max_dim {
+        return (pixels, width, height);
+    }
+    let (new_w, new_h) = if width >= height {
+        // Divides by width (>= height and > 0 since max(w,h) > max_dim ≥ 0)
+        let new_h = (u64::from(height) * u64::from(max_dim) / u64::from(width)).max(1);
+        (max_dim, u32::try_from(new_h).unwrap_or(max_dim))
+    } else {
+        let new_w = (u64::from(width) * u64::from(max_dim) / u64::from(height)).max(1);
+        (u32::try_from(new_w).unwrap_or(max_dim), max_dim)
+    };
+    tracing::debug!(
+        original_width = width,
+        original_height = height,
+        scaled_width = new_w,
+        scaled_height = new_h,
+        "image scaled"
+    );
+    let img = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(width, height, pixels)
+        .expect("pixel buffer must match declared dimensions");
+    let resized =
+        image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Lanczos3);
+    (resized.into_raw(), new_w, new_h)
 }
 
 #[cfg(test)]
@@ -284,6 +317,25 @@ mod tests {
         // Both x values negative — span is entirely off-screen to the left.
         // Casting a negative x2 to u32 wraps to a huge index; this must not panic.
         draw_hline(&mut fb, 10, 10, -5, -1, 5, 255, 0, 0, 1.0);
-        assert_eq!(fb, before, "entirely off-screen-left span must not write to framebuffer");
+        assert_eq!(
+            fb, before,
+            "entirely off-screen-left span must not write to framebuffer"
+        );
+    }
+
+    #[test]
+    fn scale_image_noop_when_within_max() {
+        let pixels = vec![255u8; 10 * 3];
+        let (out, w, h) = scale_image(pixels.clone(), 10, 1, 256);
+        assert_eq!((w, h), (10, 1));
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn scale_image_reduces_max_dimension() {
+        let pixels = vec![0u8; 400 * 300 * 3];
+        let (_, w, h) = scale_image(pixels, 400, 300, 100);
+        assert_eq!(w, 100, "width should be capped at max_dim");
+        assert!(h > 0 && h <= 100, "height {h} should be > 0 and <= 100");
     }
 }

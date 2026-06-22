@@ -1,12 +1,8 @@
 //! shapeme — approximate images with shapes via simulated annealing.
 #![forbid(unsafe_code)]
 
-pub(crate) mod annealing;
-pub(crate) mod io;
-pub(crate) mod render;
-pub(crate) mod shapes;
-
 use std::cmp::Ordering;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
@@ -21,14 +17,12 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::render::{Canvas, Texture, TextureCreator};
 use sdl2::video::{Window, WindowContext};
+use tracing::Level;
 
-use annealing::{AnnealingState, ShapeSet, mutate_shapes};
-use io::{
-    StoredConfig, build_svg, load_binary, load_png, save_binary, scale_image, svg_to_data_url,
-    write_svg,
-};
-use render::{apply_blur, compute_diff, draw_shapes};
-use shapes::{Shape, random_shape};
+use libshapeme::annealing::{AnnealingState, ShapeSet, mutate_shapes};
+use libshapeme::render::{apply_blur, compute_diff, draw_shapes, scale_image};
+use libshapeme::shapes::{Shape, random_shape};
+use libshapeme::svg::{build_svg, svg_to_data_url};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,6 +30,12 @@ use shapes::{Shape, random_shape};
     about = "Approximate images with shapes via simulated annealing"
 )]
 struct Args {
+    /// Suppress all output except warnings and errors
+    #[arg(long, global = true)]
+    quiet: bool,
+    /// Enable verbose debug output
+    #[arg(long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -109,6 +109,93 @@ struct ProcessArgs {
     parallel_batches: usize,
 }
 
+/// Configuration embedded in the checkpoint by `setup`. Carries everything `process` needs
+/// to reconstruct the run without any additional CLI flags.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct StoredConfig {
+    /// Scaled RGB24 pixel data (width × height × 3 bytes).
+    image: Vec<u8>,
+    width: u32,
+    height: u32,
+    use_triangles: bool,
+    use_circles: bool,
+    mutation_rate: u32,
+    max_bytes: Option<usize>,
+    /// Default SVG output path; `process --output-svg` overrides this.
+    output_svg: PathBuf,
+    max_shapes: usize,
+    initial_shapes: usize,
+    /// User-supplied starting blur sigma; used to reset blur on `process --restart`.
+    initial_blur_radius: Option<f32>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Checkpoint {
+    config: StoredConfig,
+    state: AnnealingState,
+    shapes: Vec<Shape>,
+}
+
+/// Load an image (any format supported by the image crate) and return it as an
+/// RGB24 byte buffer plus dimensions.
+fn load_png(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
+    let img = image::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?
+        .into_rgb8();
+    let width = img.width();
+    let height = img.height();
+    Ok((img.into_raw(), width, height))
+}
+
+/// Write an SVG string to a file.
+fn write_svg(path: &Path, svg: &str) -> Result<()> {
+    fs::write(path, svg).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Save config, annealing state and shapes to a binary checkpoint file.
+fn save_binary(
+    path: &Path,
+    config: &StoredConfig,
+    state: &AnnealingState,
+    shapes: &[Shape],
+) -> Result<()> {
+    let checkpoint = Checkpoint {
+        config: config.clone(),
+        state: state.clone(),
+        shapes: shapes.to_vec(),
+    };
+    let encoded = bincode::serde::encode_to_vec(&checkpoint, bincode::config::standard())
+        .context("failed to encode checkpoint")?;
+    fs::write(path, encoded).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+/// Load a binary checkpoint. Returns `None` if the file does not exist (fresh start).
+///
+/// Fails with a clear message on corrupt or incompatible data — run `shapeme setup` to create
+/// a new checkpoint.
+fn load_binary(path: &Path) -> Result<Option<(StoredConfig, AnnealingState, Vec<Shape>)>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let (checkpoint, _): (Checkpoint, _) =
+        bincode::serde::decode_from_slice(&data, bincode::config::standard()).with_context(
+            || {
+                format!(
+                    "failed to decode checkpoint at {} — run `shapeme setup` to create a new one",
+                    path.display()
+                )
+            },
+        )?;
+    let config = checkpoint.config;
+    anyhow::ensure!(
+        config.image.len() == (config.width * config.height * 3) as usize,
+        "checkpoint image dimensions do not match pixel data — run `shapeme setup` to recreate"
+    );
+    Ok(Some((config, checkpoint.state, checkpoint.shapes)))
+}
+
 /// SDL2 handles bundled together. Field order determines drop order:
 /// texture is destroyed before canvas (renderer), which is correct for SDL2.
 struct SdlCtx {
@@ -178,7 +265,7 @@ fn setup(args: &SetupArgs) -> Result<()> {
     } else {
         (raw_pixels, raw_width, raw_height)
     };
-    println!("Image {width}×{height}");
+    tracing::info!(width, height, "image loaded");
 
     let max_shapes = args.max_shapes.max(args.initial_shapes);
 
@@ -200,7 +287,7 @@ fn setup(args: &SetupArgs) -> Result<()> {
     state.blur_radius = args.blur_radius;
 
     save_binary(&args.checkpoint, &config, &state, &[])?;
-    println!("Checkpoint written to {}", args.checkpoint.display());
+    tracing::info!(path = %args.checkpoint.display(), "checkpoint written");
     Ok(())
 }
 
@@ -471,16 +558,15 @@ fn process(args: &ProcessArgs) -> Result<()> {
                             ctx.canvas.present();
                         }
                     }
-                    println!(
-                        "Diff {:.4}% (shapes:{}, max:{}, gen:{}, temp:{:.5}, blur:{:?})",
-                        round_display_diff,
-                        update.shapes.len(),
-                        update.max_shapes_incremental,
-                        update.generation,
-                        update.temperature,
-                        absbest_blur,
+                    tracing::info!(
+                        diff_pct = round_display_diff,
+                        shapes = update.shapes.len(),
+                        max_shapes = update.max_shapes_incremental,
+                        generation = update.generation,
+                        temperature = update.temperature,
+                        blur = ?update.blur,
+                        "improved"
                     );
-
                 }
             }
 
@@ -568,14 +654,14 @@ fn process(args: &ProcessArgs) -> Result<()> {
         absbest_shapes = winner.absbest_shapes;
         absbest_blur = winner.absbest_blur;
 
-        println!(
-            "Diff {:.4}% (shapes:{}, max:{}, gen:{}, temp:{:.5}, blur:{:?})",
-            state.absbestdiff,
-            absbest_shapes.len(),
-            state.max_shapes_incremental,
-            state.generation,
-            state.temperature,
-            absbest_blur,
+        tracing::info!(
+            diff_pct = state.absbestdiff,
+            shapes = absbest_shapes.len(),
+            max_shapes = state.max_shapes_incremental,
+            generation = state.generation,
+            temperature = state.temperature,
+            blur = ?absbest_blur,
+            "round complete"
         );
 
         if let Some(ctx) = &mut sdl_ctx {
@@ -621,6 +707,16 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    let level = if args.quiet {
+        Level::WARN
+    } else if args.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
+    tracing_subscriber::fmt().with_max_level(level).init();
+
     match args.command {
         Command::Setup(setup_args) => setup(&setup_args),
         Command::Process(process_args) => process(&process_args),

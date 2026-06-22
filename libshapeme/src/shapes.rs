@@ -4,27 +4,49 @@ use serde::{Deserialize, Serialize};
 pub(crate) const MINALPHA: u8 = 1;
 pub(crate) const MAXALPHA: u8 = 100;
 
+/// A geometric primitive drawn into the framebuffer with alpha blending.
+///
+/// Alpha is stored as an integer percentage (1–100) and divided by 100.0 on render.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum Shape {
+pub enum Shape {
+    /// Filled triangle with vertices sorted by y-coordinate for the rasteriser.
     Triangle {
+        /// First vertex x coordinate.
         x1: i16,
+        /// First vertex y coordinate.
         y1: i16,
+        /// Second vertex x coordinate.
         x2: i16,
+        /// Second vertex y coordinate.
         y2: i16,
+        /// Third vertex x coordinate.
         x3: i16,
+        /// Third vertex y coordinate.
         y3: i16,
+        /// Red channel (0–255).
         r: u8,
+        /// Green channel (0–255).
         g: u8,
+        /// Blue channel (0–255).
         b: u8,
+        /// Alpha as an integer percentage (1–100).
         alpha: u8,
     },
+    /// Filled circle with radius clamped to remain within the blur margin.
     Circle {
+        /// Centre x coordinate.
         cx: i16,
+        /// Centre y coordinate.
         cy: i16,
+        /// Radius in pixels.
         radius: i16,
+        /// Red channel (0–255).
         r: u8,
+        /// Green channel (0–255).
         g: u8,
+        /// Blue channel (0–255).
         b: u8,
+        /// Alpha as an integer percentage (1–100).
         alpha: u8,
     },
 }
@@ -105,7 +127,8 @@ fn random_color(rng: &mut impl Rng) -> (u8, u8, u8, u8) {
     (r, g, b, alpha)
 }
 
-pub(crate) fn random_shape(
+/// Generate a random shape within the image bounds, extended by `margin` on all sides.
+pub fn random_shape(
     rng: &mut impl Rng,
     width: u32,
     height: u32,
@@ -143,6 +166,7 @@ pub(crate) fn random_shape(
     shape
 }
 
+/// Generate a random shape near a random anchor point, with all coordinates within `delta` pixels.
 pub(crate) fn random_small_shape(
     rng: &mut impl Rng,
     width: u32,
@@ -184,6 +208,7 @@ pub(crate) fn random_small_shape(
     shape
 }
 
+/// Apply a random mutation to a single shape in place.
 pub(crate) fn mutate_shape(
     rng: &mut impl Rng,
     shape: &mut Shape,
@@ -391,7 +416,16 @@ mod tests {
             alpha: 50,
         };
         normalize(&mut shape, 100, 100, margin);
-        if let Shape::Triangle { x1, y1, x2, y2, x3, y3, .. } = shape {
+        if let Shape::Triangle {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+            ..
+        } = shape
+        {
             assert_eq!(x1, -5, "x1 within margin should be unchanged");
             assert_eq!(y1, -5, "y1 within margin should be unchanged");
             assert_eq!(x2, 104, "x2 within margin should be unchanged");
