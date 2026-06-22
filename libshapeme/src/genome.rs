@@ -1,0 +1,340 @@
+//! Genome-level traits and types combining multiple genes into a complete candidate solution.
+//!
+//! A `Genome` can evaluate its own fitness, mutate itself, and recombine with another genome
+//! of the same type.  `ShapeGenome` is the concrete implementation used by the main annealing
+//! loop: it holds a non-empty `Vec<ShapeGene>` and an optional `BlurGene`.
+//!
+//! # Design rationale
+//!
+//! Moving mutation and fitness evaluation into the genome type makes the annealing loop
+//! independent of representation details.  The `fitness` method accepts a caller-owned
+//! scratch buffer so the hot path never allocates per-generation.
+
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+
+use crate::annealing::AnnealingState;
+use crate::gene::{BlurGene, Gene, MutationConfig, ShapeGene};
+use crate::render::{apply_blur, compute_diff, draw_genes};
+use crate::shapes::Shape;
+
+/// A complete candidate solution produced by combining genes.
+pub trait Genome: Clone + Send + Sync {
+    /// Compute the percentage diff between this genome's rendering and `target`.
+    ///
+    /// `scratch` is zeroed and reused by the caller between calls — avoids a per-call
+    /// allocation in the hot annealing loop.
+    fn fitness(&self, target: &[u8], width: u32, height: u32, scratch: &mut Vec<u8>) -> f32;
+
+    /// Return a mutated copy of this genome.
+    #[must_use]
+    fn mutate(
+        &self,
+        rng: &mut impl Rng,
+        state: &AnnealingState,
+        config: &MutationConfig,
+    ) -> Self;
+
+    /// Produce an offspring genome from `self` and `other`.
+    #[must_use]
+    fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self;
+}
+
+/// A candidate solution: a non-empty list of `ShapeGene`s plus an optional blur.
+///
+/// The `shapes` invariant (non-empty) is maintained by all mutation and recombination paths.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShapeGenome {
+    /// Shapes in arbitrary order; sorted by `z_order` before rasterisation.
+    pub shapes: Vec<ShapeGene>,
+    /// Optional global Gaussian blur applied after rasterisation.
+    pub blur: Option<BlurGene>,
+}
+
+impl ShapeGenome {
+    /// Create a genome from legacy `Vec<Shape>`, assigning z-order by original index.
+    ///
+    /// Index-as-z-order preserves the original draw order exactly during checkpoint migration.
+    #[must_use]
+    pub fn from_shapes(shapes: Vec<Shape>) -> Self {
+        let genes = shapes
+            .into_iter()
+            .enumerate()
+            .map(|(i, shape)| ShapeGene {
+                shape,
+                z_order: i as u16,
+            })
+            .collect();
+        Self {
+            shapes: genes,
+            blur: None,
+        }
+    }
+
+    /// Extract shapes sorted by z-order, for display or SVG output.
+    #[must_use]
+    pub fn sorted_shapes(&self) -> Vec<&Shape> {
+        let mut genes: Vec<&ShapeGene> = self.shapes.iter().collect();
+        genes.sort_unstable_by_key(|g| g.z_order);
+        genes.iter().map(|g| &g.shape).collect()
+    }
+
+    /// The blur radius, if any.
+    #[must_use]
+    pub fn blur_radius(&self) -> Option<f32> {
+        self.blur.as_ref().map(|b| b.radius)
+    }
+}
+
+impl Genome for ShapeGenome {
+    fn fitness(&self, target: &[u8], width: u32, height: u32, scratch: &mut Vec<u8>) -> f32 {
+        scratch.fill(0);
+        draw_genes(scratch, width, height, &self.shapes);
+        let blurred_opt = self.blur_radius().map(|r| apply_blur(scratch, width, height, r));
+        let display: &[u8] = blurred_opt.as_deref().unwrap_or(scratch);
+        let diff = compute_diff(target, display);
+        diff as f32 / (width * height) as f32 / 442.0 * 100.0
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "mutation branches mirror the original mutate_shapes logic; factoring them out adds noise"
+    )]
+    fn mutate(
+        &self,
+        rng: &mut impl Rng,
+        state: &AnnealingState,
+        config: &MutationConfig,
+    ) -> Self {
+        const MUTATION_ATTEMPTS: usize = 10;
+
+        let mut shapes = self.shapes.clone();
+        let mut blur = self.blur.clone();
+
+        // 10% chance: add a new gene (respects incremental cap)
+        if rng.random_range(0..10u32) == 0
+            && shapes.len() < state.max_shapes
+            && shapes.len() < state.max_shapes_incremental
+        {
+            tracing::trace!(mutation = "add-gene", "adding shape gene");
+            shapes.push(ShapeGene::random(rng, config));
+            return Self { shapes, blur };
+        }
+
+        // 5% chance: remove a gene (enforces non-empty invariant)
+        if rng.random_range(0..20u32) == 0 && shapes.len() > 1 {
+            tracing::trace!(mutation = "remove-gene", "removing shape gene");
+            let idx = rng.random_range(0..shapes.len());
+            shapes.remove(idx);
+            return Self { shapes, blur };
+        }
+
+        // 5% chance: swap z_orders of two genes (equivalent to reordering)
+        if rng.random_range(0..20u32) == 0 && shapes.len() >= 2 {
+            tracing::trace!(mutation = "swap-z-order", "swapping z_orders");
+            let a = rng.random_range(0..shapes.len());
+            let b = rng.random_range(0..shapes.len());
+            if a != b {
+                let za = shapes[a].z_order;
+                let zb = shapes[b].z_order;
+                shapes[a].z_order = zb;
+                shapes[b].z_order = za;
+            }
+        }
+
+        // ~5% chance: nudge or toggle blur
+        if rng.random_range(0..20u32) == 0 {
+            tracing::trace!(mutation = "nudge-blur", "nudging blur gene");
+            blur = blur.map_or(Some(BlurGene { radius: 0.5 }), |b| {
+                let mutated = b.mutate(rng, config);
+                if mutated.radius < 0.1 { None } else { Some(mutated) }
+            });
+        }
+
+        // Attempt individual shape gene mutations
+        for _ in 0..MUTATION_ATTEMPTS {
+            let idx = rng.random_range(0..shapes.len());
+            if rng.random_range(0..1000u32) < config.mutation_rate {
+                shapes[idx] = shapes[idx].mutate(rng, config);
+            }
+        }
+
+        Self { shapes, blur }
+    }
+
+    fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self {
+        // Single-point crossover in z-order space.
+        let mut a_sorted = self.shapes.clone();
+        let mut b_sorted = other.shapes.clone();
+        a_sorted.sort_unstable_by_key(|g| g.z_order);
+        b_sorted.sort_unstable_by_key(|g| g.z_order);
+
+        let min_len = a_sorted.len().min(b_sorted.len());
+        let shapes = if min_len <= 1 {
+            // Can't split; pick the longer parent wholesale
+            if a_sorted.len() >= b_sorted.len() {
+                a_sorted
+            } else {
+                b_sorted
+            }
+        } else {
+            let k = rng.random_range(1..min_len);
+            let mut child: Vec<ShapeGene> = a_sorted[..k].to_vec();
+            child.extend_from_slice(&b_sorted[k..]);
+            if child.is_empty() {
+                // Fallback: should never happen with k ≥ 1, but enforce invariant
+                a_sorted[..1].to_vec()
+            } else {
+                child
+            }
+        };
+
+        // Blur recombination
+        let blur = match (&self.blur, &other.blur) {
+            (Some(a), Some(b)) => Some(a.recombine(b, rng)),
+            (Some(b), None) | (None, Some(b)) => {
+                if rng.random_bool(0.5) { Some(b.clone()) } else { None }
+            }
+            (None, None) => None,
+        };
+
+        Self { shapes, blur }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::SeedableRng;
+    use rand::rngs::SmallRng;
+
+    use super::*;
+    use crate::shapes::Shape;
+
+    fn sample_config() -> MutationConfig {
+        MutationConfig {
+            width: 100,
+            height: 100,
+            margin: 0,
+            mutation_rate: 500,
+            use_triangles: true,
+            use_circles: false,
+            use_polygons: false,
+        }
+    }
+
+    fn sample_genome() -> ShapeGenome {
+        ShapeGenome {
+            shapes: vec![
+                ShapeGene {
+                    shape: Shape::Triangle {
+                        x1: 0,
+                        y1: 0,
+                        x2: 50,
+                        y2: 0,
+                        x3: 25,
+                        y3: 50,
+                        r: 255,
+                        g: 0,
+                        b: 0,
+                        alpha: 50,
+                    },
+                    z_order: 100,
+                },
+                ShapeGene {
+                    shape: Shape::Triangle {
+                        x1: 10,
+                        y1: 10,
+                        x2: 60,
+                        y2: 10,
+                        x3: 35,
+                        y3: 60,
+                        r: 0,
+                        g: 255,
+                        b: 0,
+                        alpha: 50,
+                    },
+                    z_order: 200,
+                },
+            ],
+            blur: None,
+        }
+    }
+
+    #[test]
+    fn from_shapes_preserves_order_as_z_order() {
+        let shapes = vec![
+            Shape::Circle {
+                cx: 10,
+                cy: 10,
+                radius: 5,
+                r: 255,
+                g: 0,
+                b: 0,
+                alpha: 50,
+            },
+            Shape::Circle {
+                cx: 20,
+                cy: 20,
+                radius: 5,
+                r: 0,
+                g: 255,
+                b: 0,
+                alpha: 50,
+            },
+        ];
+        let genome = ShapeGenome::from_shapes(shapes);
+        assert_eq!(genome.shapes[0].z_order, 0);
+        assert_eq!(genome.shapes[1].z_order, 1);
+    }
+
+    #[test]
+    fn mutate_never_empties_genome() {
+        let mut rng = SmallRng::seed_from_u64(42);
+        let mut genome = ShapeGenome {
+            shapes: vec![ShapeGene {
+                shape: Shape::Triangle {
+                    x1: 0,
+                    y1: 0,
+                    x2: 50,
+                    y2: 0,
+                    x3: 25,
+                    y3: 50,
+                    r: 128,
+                    g: 128,
+                    b: 128,
+                    alpha: 50,
+                },
+                z_order: 0,
+            }],
+            blur: None,
+        };
+        let config = sample_config();
+        let state = AnnealingState::new(64, 1);
+        for _ in 0..500 {
+            genome = genome.mutate(&mut rng, &state, &config);
+            assert!(!genome.shapes.is_empty(), "genome must never be empty");
+        }
+    }
+
+    #[test]
+    fn recombine_preserves_non_empty() {
+        let mut rng = SmallRng::seed_from_u64(42);
+        let a = sample_genome();
+        let b = sample_genome();
+        for _ in 0..100 {
+            let child = a.recombine(&b, &mut rng);
+            assert!(!child.shapes.is_empty(), "recombined genome must not be empty");
+        }
+    }
+
+    #[test]
+    fn fitness_returns_non_negative() {
+        let genome = sample_genome();
+        let w = 10u32;
+        let h = 10u32;
+        let target = vec![0u8; (w * h * 3) as usize];
+        let mut scratch = vec![0u8; (w * h * 3) as usize];
+        let f = genome.fitness(&target, w, h, &mut scratch);
+        assert!(f >= 0.0, "fitness must be non-negative: {f}");
+    }
+}

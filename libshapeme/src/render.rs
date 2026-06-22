@@ -1,5 +1,6 @@
 use image::{ImageBuffer, Rgb, imageops};
 
+use crate::gene::ShapeGene;
 use crate::shapes::Shape;
 
 /// Draw a horizontal span into an RGB24 framebuffer with alpha blending.
@@ -200,79 +201,95 @@ fn draw_polygon(
     }
 }
 
+/// Rasterise a slice of `ShapeGene`s into an RGB24 framebuffer, sorted by `z_order`.
+///
+/// Sorting n ≤ 64 genes per call is negligible; correctness requires stable z-ordering
+/// so recombined genomes render identically regardless of `Vec` insertion order.
+pub fn draw_genes(fb: &mut [u8], width: u32, height: u32, genes: &[ShapeGene]) {
+    let mut sorted: Vec<&ShapeGene> = genes.iter().collect();
+    sorted.sort_unstable_by_key(|g| g.z_order);
+    for g in sorted {
+        draw_shape_inner(fb, width, height, &g.shape);
+    }
+}
+
+fn draw_shape_inner(fb: &mut [u8], width: u32, height: u32, shape: &Shape) {
+    match shape {
+        Shape::Triangle {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+            r,
+            g,
+            b,
+            alpha,
+        } => {
+            draw_triangle(
+                fb,
+                width,
+                height,
+                *x1,
+                *y1,
+                *x2,
+                *y2,
+                *x3,
+                *y3,
+                *r,
+                *g,
+                *b,
+                *alpha as f32 / 100.0,
+            );
+        }
+        Shape::Circle {
+            cx,
+            cy,
+            radius,
+            r,
+            g,
+            b,
+            alpha,
+        } => {
+            draw_circle(
+                fb,
+                width,
+                height,
+                *cx,
+                *cy,
+                *radius,
+                *r,
+                *g,
+                *b,
+                *alpha as f32 / 100.0,
+            );
+        }
+        Shape::Polygon {
+            vertices,
+            r,
+            g,
+            b,
+            alpha,
+        } => {
+            draw_polygon(
+                fb,
+                width,
+                height,
+                vertices,
+                *r,
+                *g,
+                *b,
+                *alpha as f32 / 100.0,
+            );
+        }
+    }
+}
+
 /// Rasterise a slice of shapes into an RGB24 framebuffer.
 pub fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
     for shape in shapes {
-        match shape {
-            Shape::Triangle {
-                x1,
-                y1,
-                x2,
-                y2,
-                x3,
-                y3,
-                r,
-                g,
-                b,
-                alpha,
-            } => {
-                draw_triangle(
-                    fb,
-                    width,
-                    height,
-                    *x1,
-                    *y1,
-                    *x2,
-                    *y2,
-                    *x3,
-                    *y3,
-                    *r,
-                    *g,
-                    *b,
-                    *alpha as f32 / 100.0,
-                );
-            }
-            Shape::Circle {
-                cx,
-                cy,
-                radius,
-                r,
-                g,
-                b,
-                alpha,
-            } => {
-                draw_circle(
-                    fb,
-                    width,
-                    height,
-                    *cx,
-                    *cy,
-                    *radius,
-                    *r,
-                    *g,
-                    *b,
-                    *alpha as f32 / 100.0,
-                );
-            }
-            Shape::Polygon {
-                vertices,
-                r,
-                g,
-                b,
-                alpha,
-            } => {
-                draw_polygon(
-                    fb,
-                    width,
-                    height,
-                    vertices,
-                    *r,
-                    *g,
-                    *b,
-                    *alpha as f32 / 100.0,
-                );
-            }
-        }
+        draw_shape_inner(fb, width, height, shape);
     }
 }
 

@@ -4,8 +4,12 @@
 //! Works on in-memory state only; all file I/O and UI live in the `shapeme` binary.
 #![forbid(unsafe_code)]
 
-/// Simulated annealing state and mutation logic.
+/// Simulated annealing state.
 pub mod annealing;
+/// Gene-level traits and types (`ShapeGene`, `BlurGene`, `Gene` trait).
+pub mod gene;
+/// Genome-level traits and types (`ShapeGenome`, `Genome` trait).
+pub mod genome;
 /// Framebuffer rasterisation, blur, and diff computation.
 pub mod render;
 /// Shape types and mutation/generation functions.

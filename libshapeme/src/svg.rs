@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 
+use crate::genome::ShapeGenome;
 use crate::shapes::Shape;
 
 /// Build an SVG string representing the given shapes.
@@ -182,6 +183,15 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
             }
         }
     }
+}
+
+/// Build an SVG string from a `ShapeGenome`, respecting z-order.
+///
+/// Thin wrapper around `build_svg` that extracts shapes in z-order and the blur radius.
+#[must_use]
+pub fn build_svg_from_genome(genome: &ShapeGenome, width: u32, height: u32, compact: bool) -> String {
+    let shapes: Vec<Shape> = genome.sorted_shapes().into_iter().cloned().collect();
+    build_svg(&shapes, width, height, genome.blur_radius(), compact)
 }
 
 /// Percent-encode a compact SVG string for use as a `data:image/svg+xml,` URL.

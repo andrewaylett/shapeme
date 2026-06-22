@@ -18,13 +18,15 @@ The dividing line: _file access in the binary, the library works on state_.
 
 ## Architecture
 
-| Crate / Module          | Responsibility                                                                   |
-| ----------------------- | -------------------------------------------------------------------------------- |
-| `libshapeme::shapes`    | `Shape` enum (Triangle/Circle), normalisation, mutation, random generation       |
-| `libshapeme::render`    | Framebuffer rasterisation, `apply_blur`, `compute_diff`, `scale_image`           |
-| `libshapeme::annealing` | `AnnealingState`, `ShapeSet`, `mutate_shapes` (add/remove/swap/mutate/blur)      |
-| `libshapeme::svg`       | `build_svg`, `svg_to_data_url` (no file writes)                                  |
-| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O |
+| Crate / Module          | Responsibility                                                                              |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| `libshapeme::shapes`    | `Shape` enum (Triangle/Circle/Polygon), normalisation, mutation, random generation          |
+| `libshapeme::gene`      | `Gene` trait, `ShapeGene` (Shape + z_order), `BlurGene`, `MutationConfig`                  |
+| `libshapeme::genome`    | `Genome` trait, `ShapeGenome` (fitness/mutate/recombine); replaces the old `ShapeSet`       |
+| `libshapeme::render`    | Framebuffer rasterisation, `draw_genes`, `apply_blur`, `compute_diff`, `scale_image`        |
+| `libshapeme::annealing` | `AnnealingState` only (mutation logic lives in `ShapeGenome::mutate`)                       |
+| `libshapeme::svg`       | `build_svg`, `build_svg_from_genome`, `svg_to_data_url` (no file writes)                    |
+| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O            |
 
 ## Key design decisions
 
@@ -64,18 +66,26 @@ but keeps the stored config and image.
 
 ### Evolved blur
 
-`blur_radius: Option<f32>` is a gene on `ShapeSet` (per-candidate) and `AnnealingState`
-(persisted absolute best). Each generation, `mutate_shapes` has a ~5% chance to nudge the blur
-radius up or down by up to 2.0, introduce it from `None`, or remove it when it drifts below 0.1.
-The SDL window and the diff computation both use the blurred framebuffer, matching SVG output.
+Blur is represented as `Option<BlurGene>` on `ShapeGenome`. Each generation, `ShapeGenome::mutate`
+has a ~5% chance to nudge the blur radius up or down by up to 2.0, introduce it from `None`, or
+remove it when `BlurGene::mutate` returns a radius below 0.1. The SDL window and the diff
+computation both use the blurred framebuffer, matching SVG output.
+
+`AnnealingState::blur_radius` is kept in sync with the current best genome's blur so checkpoints
+remain backward-readable without pulling in genome types.
 
 ### Binary checkpoint format
 
 Uses `bincode` v2 API (`bincode::serde::encode_to_vec` /
 `bincode::serde::decode_from_slice` with `bincode::config::standard()`).
-This is intentionally **incompatible** with both the raw C struct format and checkpoints written
-before the `StoredConfig` field was added. Old checkpoints fail to decode with a message directing
-the user to run `shapeme setup`.
+
+`load_binary` tries the current V2 format (`Checkpoint { config, state, genome: ShapeGenome }`)
+first, then falls back to the legacy V1 format (`LegacyCheckpoint { config, state, shapes: Vec<Shape> }`).
+On a V1 load, each `Shape` is migrated to `ShapeGene { shape, z_order: index }`, preserving the
+original draw order. `save_binary` always writes V2.
+
+Checkpoints from before the `StoredConfig` field was added are intentionally incompatible and fail
+with a message directing the user to `shapeme setup`.
 
 ### Triangle normalisation
 
@@ -112,12 +122,16 @@ A candidate is accepted when:
 The second condition allows occasional uphill moves to escape local minima,
 controlled by a temperature that decays by 0.00001 every 10 generations.
 
-### Parallel annealing batches (Rayon)
+### Parallel annealing batches + recombination (Rayon)
 
 The annealing loop runs `--parallel-batches` (default 10) independent trajectories per _round_
 via Rayon, each running `--batch-size` (default 200) generations. All batches start from the
-current absolute-best shapes and annealing state; after every round the winner (lowest
-`absbestdiff`) is inherited as the new starting point.
+current absolute-best `ShapeGenome` and annealing state.
+
+After all batches complete, the top-K batch winners (by `absbestdiff`, `--top-k` default 3) are
+crossed over pairwise via `ShapeGenome::recombine`. The best offspring is compared against the best
+batch winner; whichever has the lower diff becomes the next round's starting genome. Set `--top-k 1`
+to disable recombination.
 
 The last batch in each round is _re-heated_ (temperature reset to 0.10) to enable large
 exploratory jumps that cold batches would reject. Re-heating only applies when
@@ -128,3 +142,11 @@ so temperature decay reflects rounds-of-wall-time, not total candidate evaluatio
 batch allocates its own framebuffer and `SmallRng`; no shared mutable state is needed.
 
 SDL display and checkpoint saves happen on the main thread between rounds.
+
+### Z-ordering
+
+`ShapeGene` carries a `z_order: u16` field. `draw_genes` sorts genes ascending by `z_order` before
+rasterising, so layering is independent of `Vec` insertion order. This makes recombination-via-
+crossover safe: two parents with different gene orderings produce a child that renders consistently.
+`ShapeGenome::mutate` has a ~5% chance to swap two genes' z-orders (reordering), and `ShapeGene::mutate`
+has a ~10% chance to nudge its own z_order by ±1000.
