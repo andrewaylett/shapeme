@@ -14,8 +14,10 @@ pub fn build_svg(
     width: u32,
     height: u32,
     blur_radius: Option<f32>,
+    background: (u8, u8, u8),
     compact: bool,
 ) -> String {
+    let (bg_r, bg_g, bg_b) = background;
     let mut s = String::new();
 
     if compact {
@@ -38,8 +40,11 @@ pub fn build_svg(
             .expect("String write is infallible");
         }
 
-        write!(s, "<rect width='{width}' height='{height}' fill='#000'/>")
-            .expect("String write is infallible");
+        write!(
+            s,
+            "<rect width='{width}' height='{height}' fill='#{bg_r:02x}{bg_g:02x}{bg_b:02x}'/>"
+        )
+        .expect("String write is infallible");
         for shape in shapes {
             push_shape(&mut s, shape, true);
         }
@@ -74,7 +79,7 @@ pub fn build_svg(
 
         writeln!(
             s,
-            "<rect width=\"{width}\" height=\"{height}\" fill=\"#000000\"/>"
+            "<rect width=\"{width}\" height=\"{height}\" fill=\"#{bg_r:02x}{bg_g:02x}{bg_b:02x}\"/>"
         )
         .expect("String write is infallible");
         for shape in shapes {
@@ -191,7 +196,7 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
 #[must_use]
 pub fn build_svg_from_genome(genome: &ShapeGenome, width: u32, height: u32, compact: bool) -> String {
     let shapes: Vec<Shape> = genome.sorted_shapes().into_iter().cloned().collect();
-    build_svg(&shapes, width, height, genome.blur_radius(), compact)
+    build_svg(&shapes, width, height, genome.blur_radius(), genome.background_color(), compact)
 }
 
 /// Percent-encode a compact SVG string for use as a `data:image/svg+xml,` URL.
@@ -231,7 +236,7 @@ mod tests {
 
     #[test]
     fn build_svg_compact_has_viewbox_and_preserveaspectratio() {
-        let svg = build_svg(&sample_triangle(), 100, 200, None, true);
+        let svg = build_svg(&sample_triangle(), 100, 200, None, (0, 0, 0), true);
         assert!(
             svg.contains("viewBox='0 0 100 200'"),
             "missing viewBox: {svg}"
@@ -244,13 +249,13 @@ mod tests {
 
     #[test]
     fn build_svg_compact_is_single_line() {
-        let svg = build_svg(&sample_triangle(), 100, 100, Some(4.0), true);
+        let svg = build_svg(&sample_triangle(), 100, 100, Some(4.0), (0, 0, 0), true);
         assert!(!svg.contains('\n'), "compact SVG must not contain newlines");
     }
 
     #[test]
     fn build_svg_compact_includes_blur_filter() {
-        let svg = build_svg(&sample_triangle(), 100, 100, Some(8.0), true);
+        let svg = build_svg(&sample_triangle(), 100, 100, Some(8.0), (0, 0, 0), true);
         assert!(svg.contains("feGaussianBlur"), "missing blur filter: {svg}");
         assert!(
             svg.contains("stdDeviation='8'"),
@@ -260,7 +265,7 @@ mod tests {
 
     #[test]
     fn build_svg_verbose_has_viewbox() {
-        let svg = build_svg(&sample_triangle(), 100, 200, None, false);
+        let svg = build_svg(&sample_triangle(), 100, 200, None, (0, 0, 0), false);
         assert!(
             svg.contains("viewBox=\"0 0 100 200\""),
             "missing viewBox: {svg}"

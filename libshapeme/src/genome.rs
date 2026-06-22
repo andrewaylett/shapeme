@@ -14,7 +14,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::annealing::AnnealingState;
-use crate::gene::{BlurGene, Gene, MutationConfig, ShapeGene};
+use crate::gene::{BackgroundGene, BlurGene, Gene, MutationConfig, ShapeGene};
 use crate::render::{apply_blur, compute_diff, draw_genes};
 use crate::shapes::Shape;
 
@@ -40,7 +40,7 @@ pub trait Genome: Clone + Send + Sync {
     fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self;
 }
 
-/// A candidate solution: a non-empty list of `ShapeGene`s plus an optional blur.
+/// A candidate solution: a non-empty list of `ShapeGene`s plus an optional blur and a background.
 ///
 /// The `shapes` invariant (non-empty) is maintained by all mutation and recombination paths.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,6 +49,9 @@ pub struct ShapeGenome {
     pub shapes: Vec<ShapeGene>,
     /// Optional global Gaussian blur applied after rasterisation.
     pub blur: Option<BlurGene>,
+    /// Evolving canvas background colour, composited before any shapes.
+    #[serde(default)]
+    pub background: BackgroundGene,
 }
 
 impl ShapeGenome {
@@ -68,6 +71,7 @@ impl ShapeGenome {
         Self {
             shapes: genes,
             blur: None,
+            background: BackgroundGene::default(),
         }
     }
 
@@ -84,11 +88,22 @@ impl ShapeGenome {
     pub fn blur_radius(&self) -> Option<f32> {
         self.blur.as_ref().map(|b| b.radius)
     }
+
+    /// Background colour as an RGB triple.
+    #[must_use]
+    pub fn background_color(&self) -> (u8, u8, u8) {
+        (self.background.r, self.background.g, self.background.b)
+    }
 }
 
 impl Genome for ShapeGenome {
     fn fitness(&self, target: &[u8], width: u32, height: u32, scratch: &mut Vec<u8>) -> f32 {
-        scratch.fill(0);
+        let (bg_r, bg_g, bg_b) = self.background_color();
+        for pixel in scratch.chunks_exact_mut(3) {
+            pixel[0] = bg_r;
+            pixel[1] = bg_g;
+            pixel[2] = bg_b;
+        }
         draw_genes(scratch, width, height, &self.shapes);
         let blurred_opt = self.blur_radius().map(|r| apply_blur(scratch, width, height, r));
         let display: &[u8] = blurred_opt.as_deref().unwrap_or(scratch);
@@ -110,6 +125,7 @@ impl Genome for ShapeGenome {
 
         let mut shapes = self.shapes.clone();
         let mut blur = self.blur.clone();
+        let mut background = self.background.clone();
 
         // 10% chance: add a new gene (respects incremental cap)
         if rng.random_range(0..10u32) == 0
@@ -118,7 +134,7 @@ impl Genome for ShapeGenome {
         {
             tracing::trace!(mutation = "add-gene", "adding shape gene");
             shapes.push(ShapeGene::random(rng, config));
-            return Self { shapes, blur };
+            return Self { shapes, blur, background };
         }
 
         // 5% chance: remove a gene (enforces non-empty invariant)
@@ -126,7 +142,7 @@ impl Genome for ShapeGenome {
             tracing::trace!(mutation = "remove-gene", "removing shape gene");
             let idx = rng.random_range(0..shapes.len());
             shapes.remove(idx);
-            return Self { shapes, blur };
+            return Self { shapes, blur, background };
         }
 
         // 5% chance: swap z_orders of two genes (equivalent to reordering)
@@ -151,6 +167,12 @@ impl Genome for ShapeGenome {
             });
         }
 
+        // ~5% chance: nudge background colour
+        if rng.random_range(0..20u32) == 0 {
+            tracing::trace!(mutation = "nudge-background", "nudging background gene");
+            background = background.mutate(rng, config);
+        }
+
         // Attempt individual shape gene mutations
         for _ in 0..MUTATION_ATTEMPTS {
             let idx = rng.random_range(0..shapes.len());
@@ -159,7 +181,7 @@ impl Genome for ShapeGenome {
             }
         }
 
-        Self { shapes, blur }
+        Self { shapes, blur, background }
     }
 
     fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self {
@@ -198,7 +220,9 @@ impl Genome for ShapeGenome {
             (None, None) => None,
         };
 
-        Self { shapes, blur }
+        let background = self.background.recombine(&other.background, rng);
+
+        Self { shapes, blur, background }
     }
 }
 
@@ -257,6 +281,7 @@ mod tests {
                 },
             ],
             blur: None,
+            background: BackgroundGene::default(),
         }
     }
 
@@ -307,6 +332,7 @@ mod tests {
                 z_order: 0,
             }],
             blur: None,
+            background: BackgroundGene::default(),
         };
         let config = sample_config();
         let state = AnnealingState::new(64, 1);

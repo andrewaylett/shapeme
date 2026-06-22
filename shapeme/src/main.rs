@@ -331,6 +331,7 @@ fn setup(args: &SetupArgs) -> Result<()> {
 struct DisplayUpdate {
     shapes: Vec<Shape>,
     blur: Option<f32>,
+    background: (u8, u8, u8),
     diff: f32,
     max_shapes_incremental: usize,
     generation: i64,
@@ -353,6 +354,7 @@ fn trim_genome_to_budget(genome: ShapeGenome, width: u32, height: u32, max_bytes
     let mut shapes = genome.shapes;
     shapes.sort_unstable_by_key(|g| g.z_order);
     let mut blur = genome.blur;
+    let background = genome.background;
 
     loop {
         let flat_shapes: Vec<&Shape> = shapes.iter().map(|g| &g.shape).collect();
@@ -361,6 +363,7 @@ fn trim_genome_to_budget(genome: ShapeGenome, width: u32, height: u32, max_bytes
             width,
             height,
             blur.as_ref().map(|b| b.radius),
+            (background.r, background.g, background.b),
             true,
         );
         if svg_to_data_url(&svg).len() <= max_bytes || shapes.is_empty() {
@@ -373,6 +376,7 @@ fn trim_genome_to_budget(genome: ShapeGenome, width: u32, height: u32, max_bytes
                 width,
                 height,
                 None,
+                (background.r, background.g, background.b),
                 true,
             );
             if svg_to_data_url(&svg_no_blur).len() <= max_bytes {
@@ -384,7 +388,7 @@ fn trim_genome_to_budget(genome: ShapeGenome, width: u32, height: u32, max_bytes
         shapes.pop();
     }
 
-    ShapeGenome { shapes, blur }
+    ShapeGenome { shapes, blur, background }
 }
 
 #[allow(
@@ -465,6 +469,7 @@ fn run_batch(
                 let _ = tx.send(DisplayUpdate {
                     shapes: sorted_shapes,
                     blur: effective.blur_radius(),
+                    background: effective.background_color(),
                     diff: percdiff,
                     max_shapes_incremental: state.max_shapes_incremental,
                     generation: state.generation,
@@ -533,7 +538,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
             })
             .collect();
         let blur = config.initial_blur_radius.map(|r| libshapeme::gene::BlurGene { radius: r });
-        ShapeGenome { shapes: genes, blur }
+        ShapeGenome { shapes: genes, blur, background: libshapeme::gene::BackgroundGene::default() }
     } else {
         saved_genome
     };
@@ -546,6 +551,10 @@ fn process(args: &ProcessArgs) -> Result<()> {
     let mut absbest_genome = init_genome;
 
     let mut fb = vec![0u8; (width * height * 3) as usize];
+    let (bg_r, bg_g, bg_b) = absbest_genome.background_color();
+    for pixel in fb.chunks_exact_mut(3) {
+        pixel[0] = bg_r; pixel[1] = bg_g; pixel[2] = bg_b;
+    }
     let absbest_sorted: Vec<Shape> = absbest_genome.sorted_shapes().into_iter().cloned().collect();
     draw_shapes(&mut fb, width, height, &absbest_sorted);
 
@@ -606,7 +615,10 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 if update.diff < round_display_diff {
                     round_display_diff = update.diff;
                     if let Some(ctx) = &mut sdl_ctx {
-                        fb.fill(0);
+                        let (bg_r, bg_g, bg_b) = update.background;
+                        for pixel in fb.chunks_exact_mut(3) {
+                            pixel[0] = bg_r; pixel[1] = bg_g; pixel[2] = bg_b;
+                        }
                         draw_shapes(&mut fb, width, height, &update.shapes);
                         let blurred = update.blur.map(|r| apply_blur(&fb, width, height, r));
                         let display = blurred.as_deref().unwrap_or(&fb);
@@ -665,7 +677,10 @@ fn process(args: &ProcessArgs) -> Result<()> {
                     if update.diff < round_display_diff {
                         round_display_diff = update.diff;
                         if let Some(ctx) = &mut sdl_ctx {
-                            fb.fill(0);
+                            let (bg_r, bg_g, bg_b) = update.background;
+                            for pixel in fb.chunks_exact_mut(3) {
+                                pixel[0] = bg_r; pixel[1] = bg_g; pixel[2] = bg_b;
+                            }
                             draw_shapes(&mut fb, width, height, &update.shapes);
                             let blurred = update.blur.map(|r| apply_blur(&fb, width, height, r));
                             let display = blurred.as_deref().unwrap_or(&fb);
@@ -766,7 +781,10 @@ fn process(args: &ProcessArgs) -> Result<()> {
         );
 
         if let Some(ctx) = &mut sdl_ctx {
-            fb.fill(0);
+            let (bg_r, bg_g, bg_b) = absbest_genome.background_color();
+            for pixel in fb.chunks_exact_mut(3) {
+                pixel[0] = bg_r; pixel[1] = bg_g; pixel[2] = bg_b;
+            }
             let sorted: Vec<Shape> = absbest_genome.sorted_shapes().into_iter().cloned().collect();
             draw_shapes(&mut fb, width, height, &sorted);
             let blurred = absbest_genome.blur_radius().map(|r| apply_blur(&fb, width, height, r));

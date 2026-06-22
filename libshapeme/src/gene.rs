@@ -163,6 +163,48 @@ impl ShapeGene {
     }
 }
 
+/// An evolving background colour (always fully opaque).
+///
+/// No alpha — the background fills the canvas before any shapes are composited on top.
+/// `Default` gives black, preserving existing behaviour for old checkpoints without this field.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BackgroundGene {
+    /// Red channel (0–255).
+    pub r: u8,
+    /// Green channel (0–255).
+    pub g: u8,
+    /// Blue channel (0–255).
+    pub b: u8,
+}
+
+impl Gene for BackgroundGene {
+    fn mutate(&self, rng: &mut impl Rng, _config: &MutationConfig) -> Self {
+        if rng.random_bool(0.5) {
+            // Full random replacement
+            Self {
+                r: rng.random(),
+                g: rng.random(),
+                b: rng.random(),
+            }
+        } else {
+            // Small nudge on each channel
+            let mut nudge = |v: u8| -> u8 {
+                let delta = rng.random_range(0u8..=5u8);
+                if rng.random_bool(0.5) { v.saturating_add(delta) } else { v.saturating_sub(delta) }
+            };
+            Self { r: nudge(self.r), g: nudge(self.g), b: nudge(self.b) }
+        }
+    }
+
+    fn recombine(&self, other: &Self, _rng: &mut impl Rng) -> Self {
+        Self {
+            r: u8::midpoint(self.r, other.r),
+            g: u8::midpoint(self.g, other.g),
+            b: u8::midpoint(self.b, other.b),
+        }
+    }
+}
+
 /// An evolving Gaussian blur radius (always positive when present).
 ///
 /// `None` blur is represented by `Option<BlurGene>` at the genome level rather than a
