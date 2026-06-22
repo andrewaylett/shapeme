@@ -208,6 +208,9 @@ struct DisplayUpdate {
     shapes: Vec<Shape>,
     blur: Option<f32>,
     diff: f32,
+    max_shapes_incremental: usize,
+    generation: i64,
+    temperature: f32,
 }
 
 /// Result of a single parallel annealing batch.
@@ -336,6 +339,9 @@ fn run_batch(
                     shapes: effective.clone(),
                     blur: effective_blur,
                     diff: percdiff,
+                    max_shapes_incremental: state.max_shapes_incremental,
+                    generation: state.generation,
+                    temperature: state.temperature,
                 });
             }
 
@@ -465,6 +471,16 @@ fn process(args: &ProcessArgs) -> Result<()> {
                             ctx.canvas.present();
                         }
                     }
+                    println!(
+                        "Diff {:.4}% (shapes:{}, max:{}, gen:{}, temp:{:.5}, blur:{:?})",
+                        round_display_diff,
+                        update.shapes.len(),
+                        update.max_shapes_incremental,
+                        update.generation,
+                        update.temperature,
+                        absbest_blur,
+                    );
+
                 }
             }
 
