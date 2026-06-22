@@ -82,6 +82,7 @@ pub fn mutate_shapes(
     mutation_rate: u32,
     use_triangles: bool,
     use_circles: bool,
+    use_polygons: bool,
 ) {
     // The C source hardcodes 10 mutation attempts per generation regardless
     // of the number of shapes, so we match that here.
@@ -96,11 +97,11 @@ pub fn mutate_shapes(
     {
         tracing::trace!(mutation = "add-shape", "adding shape");
         let new_shape = match rng.random_range(0..5u32) {
-            0 => random_shape(rng, width, height, use_triangles, use_circles, margin),
-            1 => random_small_shape(rng, width, height, 5, use_triangles, use_circles, margin),
-            2 => random_small_shape(rng, width, height, 10, use_triangles, use_circles, margin),
-            3 => random_small_shape(rng, width, height, 25, use_triangles, use_circles, margin),
-            _ => random_small_shape(rng, width, height, 2, use_triangles, use_circles, margin),
+            0 => random_shape(rng, width, height, use_triangles, use_circles, use_polygons, margin),
+            1 => random_small_shape(rng, width, height, 5, use_triangles, use_circles, use_polygons, margin),
+            2 => random_small_shape(rng, width, height, 10, use_triangles, use_circles, use_polygons, margin),
+            3 => random_small_shape(rng, width, height, 25, use_triangles, use_circles, use_polygons, margin),
+            _ => random_small_shape(rng, width, height, 2, use_triangles, use_circles, use_polygons, margin),
         };
         set.shapes.push(new_shape);
         return;

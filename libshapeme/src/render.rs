@@ -160,10 +160,50 @@ fn draw_triangle(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pixel coordinate + colour + alpha parameters are unavoidable in a rasterizer"
+)]
+fn draw_polygon(
+    fb: &mut [u8],
+    width: u32,
+    height: u32,
+    vertices: &[(i16, i16)],
+    r: u8,
+    g: u8,
+    b: u8,
+    alpha: f32,
+) {
+    let n = vertices.len();
+    if n < 3 {
+        return;
+    }
+    let y_min = vertices.iter().map(|v| v.1).min().expect("vertices is non-empty") as i32;
+    let y_max = vertices.iter().map(|v| v.1).max().expect("vertices is non-empty") as i32;
+    for y in y_min..=y_max {
+        let mut xs: Vec<i32> = Vec::new();
+        for i in 0..n {
+            let (x1, y1) = (vertices[i].0 as i32, vertices[i].1 as i32);
+            let (x2, y2) = (vertices[(i + 1) % n].0 as i32, vertices[(i + 1) % n].1 as i32);
+            // Include the lower endpoint, exclude the upper — avoids double-counting at vertices.
+            if (y1 <= y && y < y2) || (y2 <= y && y < y1) {
+                let x = x1 + (y - y1) * (x2 - x1) / (y2 - y1);
+                xs.push(x);
+            }
+        }
+        xs.sort_unstable();
+        for pair in xs.chunks(2) {
+            if pair.len() == 2 {
+                draw_hline(fb, width, height, pair[0], pair[1], y, r, g, b, alpha);
+            }
+        }
+    }
+}
+
 /// Rasterise a slice of shapes into an RGB24 framebuffer.
 pub fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
     for shape in shapes {
-        match *shape {
+        match shape {
             Shape::Triangle {
                 x1,
                 y1,
@@ -180,16 +220,16 @@ pub fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
                     fb,
                     width,
                     height,
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    x3,
-                    y3,
-                    r,
-                    g,
-                    b,
-                    alpha as f32 / 100.0,
+                    *x1,
+                    *y1,
+                    *x2,
+                    *y2,
+                    *x3,
+                    *y3,
+                    *r,
+                    *g,
+                    *b,
+                    *alpha as f32 / 100.0,
                 );
             }
             Shape::Circle {
@@ -205,13 +245,31 @@ pub fn draw_shapes(fb: &mut [u8], width: u32, height: u32, shapes: &[Shape]) {
                     fb,
                     width,
                     height,
-                    cx,
-                    cy,
-                    radius,
-                    r,
-                    g,
-                    b,
-                    alpha as f32 / 100.0,
+                    *cx,
+                    *cy,
+                    *radius,
+                    *r,
+                    *g,
+                    *b,
+                    *alpha as f32 / 100.0,
+                );
+            }
+            Shape::Polygon {
+                vertices,
+                r,
+                g,
+                b,
+                alpha,
+            } => {
+                draw_polygon(
+                    fb,
+                    width,
+                    height,
+                    vertices,
+                    *r,
+                    *g,
+                    *b,
+                    *alpha as f32 / 100.0,
                 );
             }
         }
@@ -337,5 +395,23 @@ mod tests {
         let (_, w, h) = scale_image(pixels, 400, 300, 100);
         assert_eq!(w, 100, "width should be capped at max_dim");
         assert!(h > 0 && h <= 100, "height {h} should be > 0 and <= 100");
+    }
+
+    #[test]
+    fn draw_polygon_fills_square() {
+        // 4-vertex square: x ∈ [1,8], y ∈ [1,7] (upper endpoint excluded by scanline rule).
+        let mut fb = vec![0u8; 10 * 10 * 3];
+        let vertices: &[(i16, i16)] = &[(1, 1), (8, 1), (8, 8), (1, 8)];
+        draw_polygon(&mut fb, 10, 10, vertices, 255, 255, 255, 1.0);
+        // Check interior pixels are filled (well inside all four edges).
+        for y in 2i32..7 {
+            for x in 2i32..7 {
+                let base = ((y * 10 + x) * 3) as usize;
+                assert_eq!(fb[base], 255, "interior pixel ({x},{y}) should be filled");
+            }
+        }
+        // Corners outside the polygon must be untouched.
+        assert_eq!(fb[0], 0, "top-left corner (0,0) should not be filled");
+        assert_eq!(fb[(9 * 10 + 9) * 3], 0, "bottom-right corner (9,9) should not be filled");
     }
 }

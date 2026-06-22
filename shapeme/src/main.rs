@@ -61,6 +61,8 @@ struct SetupArgs {
     use_triangles: u8,
     #[arg(long, default_value = "0")]
     use_circles: u8,
+    #[arg(long, default_value = "0")]
+    use_polygons: u8,
     #[arg(long, default_value = "64")]
     max_shapes: usize,
     #[arg(long, default_value = "1")]
@@ -119,6 +121,7 @@ struct StoredConfig {
     height: u32,
     use_triangles: bool,
     use_circles: bool,
+    use_polygons: bool,
     mutation_rate: u32,
     max_bytes: Option<usize>,
     /// Default SVG output path; `process --output-svg` overrides this.
@@ -255,8 +258,11 @@ fn finalize(
 fn setup(args: &SetupArgs) -> Result<()> {
     let use_triangles = args.use_triangles != 0;
     let use_circles = args.use_circles != 0;
-    if !use_triangles && !use_circles {
-        anyhow::bail!("at least one of --use-triangles and --use-circles must be non-zero");
+    let use_polygons = args.use_polygons != 0;
+    if !use_triangles && !use_circles && !use_polygons {
+        anyhow::bail!(
+            "at least one of --use-triangles, --use-circles, or --use-polygons must be non-zero"
+        );
     }
 
     let (raw_pixels, raw_width, raw_height) = load_png(&args.input)?;
@@ -275,6 +281,7 @@ fn setup(args: &SetupArgs) -> Result<()> {
         height,
         use_triangles,
         use_circles,
+        use_polygons,
         mutation_rate: args.mutation_rate,
         max_bytes: args.max_bytes,
         output_svg: args.output_svg.clone(),
@@ -343,6 +350,7 @@ fn run_batch(
     let mutation_rate = config.mutation_rate.min(1000);
     let use_triangles = config.use_triangles;
     let use_circles = config.use_circles;
+    let use_polygons = config.use_polygons;
 
     for _ in 0..batch_size {
         state.generation += 1;
@@ -373,6 +381,7 @@ fn run_batch(
             mutation_rate,
             use_triangles,
             use_circles,
+            use_polygons,
         );
 
         let (effective, effective_blur) = if let Some(max_bytes) = config.max_bytes {
@@ -458,6 +467,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
     let use_triangles = config.use_triangles;
     let use_circles = config.use_circles;
+    let use_polygons = config.use_polygons;
     let width = config.width;
     let height = config.height;
 
@@ -472,7 +482,17 @@ fn process(args: &ProcessArgs) -> Result<()> {
         let mut rng = SmallRng::from_os_rng();
         let margin = config.initial_blur_radius.map_or(0, |r| r.ceil() as i16);
         let shapes: Vec<Shape> = (0..config.initial_shapes)
-            .map(|_| random_shape(&mut rng, width, height, use_triangles, use_circles, margin))
+            .map(|_| {
+                random_shape(
+                    &mut rng,
+                    width,
+                    height,
+                    use_triangles,
+                    use_circles,
+                    use_polygons,
+                    margin,
+                )
+            })
             .collect();
         (shapes, config.initial_blur_radius)
     } else {

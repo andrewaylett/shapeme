@@ -150,6 +150,37 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
                 .expect("String write is infallible");
             }
         }
+        Shape::Polygon {
+            vertices,
+            r,
+            g,
+            b,
+            alpha,
+        } => {
+            let a = f32::from(*alpha) / 100.0;
+            let pts: String = vertices
+                .iter()
+                .map(|(x, y)| format!("{x},{y}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if compact {
+                write!(
+                    s,
+                    "<polygon points='{pts}' \
+                     style='fill:#{r:02x}{g:02x}{b:02x};\
+                     fill-opacity:{a:.2}'/>",
+                )
+                .expect("String write is infallible");
+            } else {
+                writeln!(
+                    s,
+                    "<polygon points=\"{pts}\" \
+                     style=\"fill:#{r:02x}{g:02x}{b:02x};\
+                     fill-opacity:{a:.2}\"/>",
+                )
+                .expect("String write is infallible");
+            }
+        }
     }
 }
 
