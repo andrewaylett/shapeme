@@ -87,6 +87,12 @@ original draw order. `save_binary` always writes V2.
 Checkpoints from before the `StoredConfig` field was added are intentionally incompatible and fail
 with a message directing the user to `shapeme setup`.
 
+Checkpoints created before the cost model was introduced (those with `AnnealingState.max_cost ≤ 512`,
+i.e. `max_shapes ≤ 23` when interpreted as a raw shape count) have shape-count values in the
+`max_cost` / `max_cost_incremental` fields rather than cost values. These decode without error but
+produce wrong behaviour (effectively a very tight budget). Re-run with `process --restart` to
+rebuild the annealing state with correct cost values derived from `StoredConfig.max_shapes`.
+
 ### Triangle normalisation
 
 Bubble-sort of (x,y) vertex pairs by y-coordinate, identical to the C
@@ -142,6 +148,21 @@ so temperature decay reflects rounds-of-wall-time, not total candidate evaluatio
 batch allocates its own framebuffer and `SmallRng`; no shared mutable state is needed.
 
 SDL display and checkpoint saves happen on the main thread between rounds.
+
+### Polygon cost model and vertex cap
+
+Gene budget is tracked in approximate bincode byte units rather than raw shape count.
+`TRIANGLE_COST = 22`, `CIRCLE_COST = 16`, `POLYGON_BASE_COST = 18`, `POLYGON_VERTEX_COST = 4`.
+CLI `--max-shapes N` is stored as `max_cost = N × TRIANGLE_COST` in `AnnealingState` so the
+user-visible "shapes" concept is preserved while the budget correctly penalises complex polygons.
+
+`max_polygon_vertices` in `MutationConfig` (set to `max_shapes.max(6)`) caps the `split_edge`
+mutation, preventing unbounded polygon growth. When the cap is reached, `split_edge` falls back
+to a small-nudge mutation instead.
+
+Polygon vertices are sorted by angle from the centroid on every `normalize()` call, eliminating
+self-intersecting edges. Clamping runs first so the centroid is computed from the final
+in-bounds positions.
 
 ### Z-ordering
 

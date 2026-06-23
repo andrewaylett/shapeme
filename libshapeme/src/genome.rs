@@ -94,6 +94,12 @@ impl ShapeGenome {
     pub fn background_color(&self) -> (u8, u8, u8) {
         (self.background.r, self.background.g, self.background.b)
     }
+
+    /// Total approximate byte cost of all shape genes in this genome.
+    #[must_use]
+    pub fn total_cost(&self) -> usize {
+        self.shapes.iter().map(|g| g.cost()).sum()
+    }
 }
 
 impl Genome for ShapeGenome {
@@ -127,14 +133,18 @@ impl Genome for ShapeGenome {
         let mut blur = self.blur.clone();
         let mut background = self.background.clone();
 
-        // 10% chance: add a new gene (respects incremental cap)
-        if rng.random_range(0..10u32) == 0
-            && shapes.len() < state.max_shapes
-            && shapes.len() < state.max_shapes_incremental
-        {
-            tracing::trace!(mutation = "add-gene", "adding shape gene");
-            shapes.push(ShapeGene::random(rng, config));
-            return Self { shapes, blur, background };
+        // 10% chance: add a new gene (respects incremental cost cap)
+        if rng.random_range(0..10u32) == 0 {
+            let candidate = ShapeGene::random(rng, config);
+            let current_cost: usize = shapes.iter().map(|g| g.cost()).sum();
+            if current_cost + candidate.cost() <= state.max_cost
+                && current_cost + candidate.cost() <= state.max_cost_incremental
+            {
+                tracing::trace!(mutation = "add-gene", "adding shape gene");
+                shapes.push(candidate);
+                return Self { shapes, blur, background };
+            }
+            // Budget exceeded — fall through to normal mutation
         }
 
         // 5% chance: remove a gene (enforces non-empty invariant)
@@ -243,6 +253,7 @@ mod tests {
             use_triangles: true,
             use_circles: false,
             use_polygons: false,
+            max_polygon_vertices: 64,
         }
     }
 
@@ -335,7 +346,7 @@ mod tests {
             background: BackgroundGene::default(),
         };
         let config = sample_config();
-        let state = AnnealingState::new(64, 1);
+        let state = AnnealingState::new_from_shape_count(64, 1);
         for _ in 0..500 {
             genome = genome.mutate(&mut rng, &state, &config);
             assert!(!genome.shapes.is_empty(), "genome must never be empty");

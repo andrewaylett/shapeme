@@ -121,6 +121,15 @@ fn normalize(shape: &mut Shape, width: u32, height: u32, margin: i16) {
                 *vx = clamp_coord(*vx, -margin, w - 1 + margin);
                 *vy = clamp_coord(*vy, -margin, h - 1 + margin);
             }
+            // Sort vertices by angle from centroid to eliminate self-intersecting edges.
+            let n = vertices.len() as f32;
+            let cx = vertices.iter().map(|(x, _)| *x as f32).sum::<f32>() / n;
+            let cy = vertices.iter().map(|(_, y)| *y as f32).sum::<f32>() / n;
+            vertices.sort_unstable_by(|(ax, ay), (bx, by)| {
+                let a_angle = (*ay as f32 - cy).atan2(*ax as f32 - cx);
+                let b_angle = (*by as f32 - cy).atan2(*bx as f32 - cx);
+                a_angle.partial_cmp(&b_angle).unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
     }
 }
@@ -288,6 +297,7 @@ pub(crate) fn mutate_shape(
     width: u32,
     height: u32,
     margin: i16,
+    max_polygon_vertices: usize,
 ) {
     match shape {
         Shape::Triangle {
@@ -432,15 +442,23 @@ pub(crate) fn mutate_shape(
             }
             6 => {
                 // Split a random edge by inserting its midpoint (nudged ±20 px).
-                let n = vertices.len();
-                let edge = rng.random_range(0..n);
-                let (x1, y1) = vertices[edge];
-                let (x2, y2) = vertices[(edge + 1) % n];
-                let mx = ((x1 as i32 + x2 as i32) / 2 + rand_between(rng, -20, 20))
-                    .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                let my = ((y1 as i32 + y2 as i32) / 2 + rand_between(rng, -20, 20))
-                    .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                vertices.insert(edge + 1, (mx, my));
+                // Falls back to a small nudge when the vertex cap has been reached.
+                if vertices.len() < max_polygon_vertices {
+                    let n = vertices.len();
+                    let edge = rng.random_range(0..n);
+                    let (x1, y1) = vertices[edge];
+                    let (x2, y2) = vertices[(edge + 1) % n];
+                    let mx = ((x1 as i32 + x2 as i32) / 2 + rand_between(rng, -20, 20))
+                        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    let my = ((y1 as i32 + y2 as i32) / 2 + rand_between(rng, -20, 20))
+                        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    vertices.insert(edge + 1, (mx, my));
+                } else {
+                    for (vx, vy) in vertices.iter_mut() {
+                        *vx = vx.saturating_add(rand_between(rng, -5, 5) as i16);
+                        *vy = vy.saturating_add(rand_between(rng, -5, 5) as i16);
+                    }
+                }
                 normalize(shape, width, height, margin);
             }
             _ => {
@@ -552,7 +570,7 @@ mod tests {
             alpha: 50,
         };
         for _ in 0..1000 {
-            mutate_shape(&mut rng, &mut shape, 100, 100, 0);
+            mutate_shape(&mut rng, &mut shape, 100, 100, 0, 100);
             if let Shape::Triangle { alpha, .. } = shape {
                 assert!(
                     (MINALPHA..=MAXALPHA).contains(&alpha),
@@ -612,7 +630,7 @@ mod tests {
             alpha: 50,
         };
         for _ in 0..1000 {
-            mutate_shape(&mut rng, &mut shape, 100, 100, 0);
+            mutate_shape(&mut rng, &mut shape, 100, 100, 0, 100);
             if let Shape::Polygon { ref vertices, .. } = shape {
                 assert!(
                     vertices.len() >= 3,
@@ -642,7 +660,7 @@ mod tests {
             } else {
                 panic!("shape changed type unexpectedly");
             };
-            mutate_shape(&mut rng, &mut shape, 100, 100, 0);
+            mutate_shape(&mut rng, &mut shape, 100, 100, 0, 100);
             let after = if let Shape::Polygon { ref vertices, .. } = shape {
                 vertices.len()
             } else {
@@ -659,5 +677,60 @@ mod tests {
             }
         }
         assert!(saw_split, "expected at least one split in 1000 mutations");
+    }
+
+    #[test]
+    fn polygon_split_respects_vertex_cap() {
+        let mut rng = seeded();
+        let cap = 5usize;
+        let mut shape = Shape::Polygon {
+            vertices: vec![(0, 0), (50, 0), (25, 50)],
+            r: 128,
+            g: 128,
+            b: 128,
+            alpha: 50,
+        };
+        for _ in 0..5000 {
+            mutate_shape(&mut rng, &mut shape, 100, 100, 0, cap);
+            if let Shape::Polygon { ref vertices, .. } = shape {
+                assert!(
+                    vertices.len() <= cap,
+                    "vertex count {} exceeds cap {cap}",
+                    vertices.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn polygon_normalise_sorts_by_angle() {
+        // Vertices in clockwise order (wrong); normalise should sort them by angle.
+        let mut shape = Shape::Polygon {
+            vertices: vec![(50, 0), (100, 50), (50, 100), (0, 50)],
+            r: 0,
+            g: 0,
+            b: 0,
+            alpha: 50,
+        };
+        normalize(&mut shape, 200, 200, 0);
+        if let Shape::Polygon { vertices, .. } = shape {
+            // After sort the angles from centroid (50,50) should be non-decreasing.
+            let cx = 50.0f32;
+            let cy = 50.0f32;
+            let angles: Vec<f32> = vertices
+                .iter()
+                .map(|(x, y)| (*y as f32 - cy).atan2(*x as f32 - cx))
+                .collect();
+            for w in angles.windows(2) {
+                assert!(
+                    w[0] <= w[1],
+                    "angles not sorted: {:?} > {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+        } else {
+            panic!("expected Polygon");
+        }
     }
 }

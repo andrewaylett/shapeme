@@ -20,7 +20,7 @@ use sdl2::video::{Window, WindowContext};
 use tracing::Level;
 
 use libshapeme::annealing::AnnealingState;
-use libshapeme::gene::{MutationConfig, ShapeGene};
+use libshapeme::gene::{MutationConfig, ShapeGene, TRIANGLE_COST};
 use libshapeme::genome::{Genome, ShapeGenome};
 use libshapeme::render::{apply_blur, draw_shapes, scale_image};
 use libshapeme::shapes::{Shape, random_shape};
@@ -319,7 +319,7 @@ fn setup(args: &SetupArgs) -> Result<()> {
         initial_blur_radius: args.blur_radius,
     };
 
-    let mut state = AnnealingState::new(max_shapes, args.initial_shapes);
+    let mut state = AnnealingState::new(max_shapes * TRIANGLE_COST, args.initial_shapes * TRIANGLE_COST);
     state.blur_radius = args.blur_radius;
 
     let empty_genome = ShapeGenome::from_shapes(vec![]);
@@ -333,7 +333,7 @@ struct DisplayUpdate {
     blur: Option<f32>,
     background: (u8, u8, u8),
     diff: f32,
-    max_shapes_incremental: usize,
+    max_cost_incremental: usize,
     generation: i64,
     temperature: f32,
 }
@@ -421,6 +421,7 @@ fn run_batch(
         use_triangles: config.use_triangles,
         use_circles: config.use_circles,
         use_polygons: config.use_polygons,
+        max_polygon_vertices: config.max_shapes.max(6),
     };
 
     let mut best_genome = start_genome.clone();
@@ -438,10 +439,10 @@ fn run_batch(
         }
 
         if state.generation % 1000 == 0
-            && state.max_shapes_incremental < state.max_shapes
-            && best_genome.shapes.len() >= state.max_shapes_incremental
+            && state.max_cost_incremental < state.max_cost
+            && best_genome.total_cost() + TRIANGLE_COST > state.max_cost_incremental
         {
-            state.max_shapes_incremental += 1;
+            state.max_cost_incremental += TRIANGLE_COST;
         }
 
         let candidate = best_genome.mutate(&mut rng, &state, &mutation_config);
@@ -471,7 +472,7 @@ fn run_batch(
                     blur: effective.blur_radius(),
                     background: effective.background_color(),
                     diff: percdiff,
-                    max_shapes_incremental: state.max_shapes_incremental,
+                    max_cost_incremental: state.max_cost_incremental,
                     generation: state.generation,
                     temperature: state.temperature,
                 });
@@ -544,7 +545,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
     };
 
     if args.restart {
-        state = AnnealingState::new(config.max_shapes, config.initial_shapes);
+        state = AnnealingState::new(config.max_shapes * TRIANGLE_COST, config.initial_shapes * TRIANGLE_COST);
     }
     state.blur_radius = init_genome.blur_radius();
 
@@ -633,7 +634,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
                     tracing::info!(
                         diff_pct = round_display_diff,
                         shapes = update.shapes.len(),
-                        max_shapes = update.max_shapes_incremental,
+                        max_cost = update.max_cost_incremental,
                         generation = update.generation,
                         temperature = update.temperature,
                         blur = ?update.blur,
@@ -773,7 +774,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
         tracing::info!(
             diff_pct = state.absbestdiff,
             shapes = absbest_genome.shapes.len(),
-            max_shapes = state.max_shapes_incremental,
+            max_cost = state.max_cost_incremental,
             generation = state.generation,
             temperature = state.temperature,
             blur = ?absbest_genome.blur_radius(),

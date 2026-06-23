@@ -16,6 +16,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::shapes::{Shape, mutate_shape, random_shape, random_small_shape};
 
+/// Approximate bincode byte cost of a `ShapeGene` wrapping a Triangle.
+///
+/// Used as the base budget unit: `--max-shapes N` → `max_cost = N × TRIANGLE_COST`.
+pub const TRIANGLE_COST: usize = 22;
+/// Approximate bincode byte cost of a `ShapeGene` wrapping a Circle.
+pub const CIRCLE_COST: usize = 16;
+/// Approximate bincode byte cost of a `ShapeGene` wrapping a Polygon, excluding per-vertex cost.
+pub const POLYGON_BASE_COST: usize = 18;
+/// Additional cost per polygon vertex.
+pub const POLYGON_VERTEX_COST: usize = 4;
+
 /// Parameters needed by gene-level mutation operations.
 ///
 /// Passed by the genome to each `Gene::mutate` call.  `BlurGene` ignores spatial fields;
@@ -36,6 +47,8 @@ pub struct MutationConfig {
     pub use_circles: bool,
     /// Whether polygon shapes are in use for this run.
     pub use_polygons: bool,
+    /// Maximum number of vertices a single Polygon gene may grow to via split_edge.
+    pub max_polygon_vertices: usize,
 }
 
 /// A single mutable, recombineable unit of genetic information.
@@ -83,7 +96,7 @@ impl Gene for ShapeGene {
                 z_order.saturating_sub(delta)
             };
         } else {
-            mutate_shape(rng, &mut shape, config.width, config.height, config.margin);
+            mutate_shape(rng, &mut shape, config.width, config.height, config.margin, config.max_polygon_vertices);
         }
 
         Self { shape, z_order }
@@ -103,6 +116,16 @@ impl Gene for ShapeGene {
 }
 
 impl ShapeGene {
+    /// Approximate serialised byte cost of this gene, used for budget accounting.
+    #[must_use]
+    pub fn cost(&self) -> usize {
+        match &self.shape {
+            Shape::Triangle { .. } => TRIANGLE_COST,
+            Shape::Circle { .. } => CIRCLE_COST,
+            Shape::Polygon { vertices, .. } => POLYGON_BASE_COST + POLYGON_VERTEX_COST * vertices.len(),
+        }
+    }
+
     /// Create a `ShapeGene` with a random shape and a fully random z-order.
     pub(crate) fn random(rng: &mut impl Rng, config: &MutationConfig) -> Self {
         let shape = match rng.random_range(0..5u32) {
