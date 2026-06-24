@@ -456,6 +456,114 @@ pub(crate) fn mutate_shape(
     }
 }
 
+/// Split a large polygon into two smaller colour-diverged polygons.
+///
+/// Divides the angle-sorted vertex list at a random start index.  Half A gets the first
+/// `n/2` vertices from that index (wrapping); half B gets the rest.  Their `OKlab` colours
+/// are nudged in opposite directions on the `a` and `b` channels while `L` is kept
+/// identical.  Returns `None` if `shape` is not a `Polygon` or has fewer than 6 vertices.
+pub fn split_polygon(
+    shape: &Shape,
+    rng: &mut impl Rng,
+    width: u32,
+    height: u32,
+    margin: i16,
+) -> Option<(Shape, Shape)> {
+    let Shape::Polygon { vertices, oklab, alpha } = shape else {
+        return None;
+    };
+    let n = vertices.len();
+    if n < 6 {
+        return None;
+    }
+    let s = rng.random_range(0..n);
+    let half = n / 2;
+
+    let verts_a: Vec<(i16, i16)> = (0..half).map(|i| vertices[(s + i) % n]).collect();
+    let verts_b: Vec<(i16, i16)> = (half..n).map(|i| vertices[(s + i) % n]).collect();
+
+    let [l, a_ch, b_ch] = *oklab;
+    let oklab_a = [l, a_ch + 0.05, b_ch - 0.05];
+    let oklab_b = [l, a_ch - 0.05, b_ch + 0.05];
+
+    let mut shape_a = Shape::Polygon { vertices: verts_a, oklab: oklab_a, alpha: *alpha };
+    let mut shape_b = Shape::Polygon { vertices: verts_b, oklab: oklab_b, alpha: *alpha };
+
+    normalize(&mut shape_a, width, height, margin);
+    normalize(&mut shape_b, width, height, margin);
+
+    Some((shape_a, shape_b))
+}
+
+/// Combine two polygons by angle-based crossover at a random dividing line through each centroid.
+///
+/// Keeps vertices from `a` whose angle from `a`'s centroid falls in `[α, α+π)`, and
+/// vertices from `b` whose angle from `b`'s centroid falls in `[α+π, α+2π)`.  The two
+/// kept sets are merged; if fewer than 3 vertices result, returns `None`.  Colour is the
+/// elementwise `OKlab` midpoint; alpha is the average clamped to `MINALPHA`.
+pub fn polygon_angle_crossover(
+    a: &Shape,
+    b: &Shape,
+    rng: &mut impl Rng,
+    width: u32,
+    height: u32,
+    margin: i16,
+) -> Option<Shape> {
+    let (Shape::Polygon { vertices: verts_a, oklab: oklab_a, alpha: alpha_a },
+         Shape::Polygon { vertices: verts_b, oklab: oklab_b, alpha: alpha_b }) = (a, b) else {
+        return None;
+    };
+
+    let dividing: f32 = rng.random::<f32>() * std::f32::consts::TAU;
+
+    let na = verts_a.len() as f32;
+    // Centroid of A as [x, y] to avoid clippy::similar_names on cx_a/cy_a.
+    let center_a = [
+        verts_a.iter().map(|(x, _)| *x as f32).sum::<f32>() / na,
+        verts_a.iter().map(|(_, y)| *y as f32).sum::<f32>() / na,
+    ];
+
+    let nb = verts_b.len() as f32;
+    let center_b = [
+        verts_b.iter().map(|(x, _)| *x as f32).sum::<f32>() / nb,
+        verts_b.iter().map(|(_, y)| *y as f32).sum::<f32>() / nb,
+    ];
+
+    let kept_a: Vec<(i16, i16)> = verts_a
+        .iter()
+        .filter(|(vx, vy)| {
+            let angle = (*vy as f32 - center_a[1]).atan2(*vx as f32 - center_a[0]);
+            let relative = (angle - dividing).rem_euclid(std::f32::consts::TAU);
+            relative < std::f32::consts::PI
+        })
+        .copied()
+        .collect();
+
+    let kept_b: Vec<(i16, i16)> = verts_b
+        .iter()
+        .filter(|(vx, vy)| {
+            let angle = (*vy as f32 - center_b[1]).atan2(*vx as f32 - center_b[0]);
+            let relative = (angle - dividing).rem_euclid(std::f32::consts::TAU);
+            relative >= std::f32::consts::PI
+        })
+        .copied()
+        .collect();
+
+    let mut combined = kept_a;
+    combined.extend(kept_b);
+
+    if combined.len() < 3 {
+        return None;
+    }
+
+    let oklab = std::array::from_fn(|i| f32::midpoint(oklab_a[i], oklab_b[i]));
+    let alpha = u16::midpoint(*alpha_a as u16, *alpha_b as u16).max(MINALPHA as u16) as u8;
+
+    let mut result = Shape::Polygon { vertices: combined, oklab, alpha };
+    normalize(&mut result, width, height, margin);
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +774,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn split_polygon_produces_two_valid_polygons() {
+        let mut rng = seeded();
+        let shape = Shape::Polygon {
+            vertices: vec![(0, 0), (50, 0), (100, 0), (100, 50), (50, 100), (0, 50)],
+            oklab: [0.5, 0.0, 0.0],
+            alpha: 50,
+        };
+        let result = split_polygon(&shape, &mut rng, 200, 200, 0);
+        assert!(result.is_some(), "split should succeed on a 6-vertex polygon");
+        let (a, b) = result.unwrap();
+        if let (Shape::Polygon { vertices: va, .. }, Shape::Polygon { vertices: vb, .. }) = (a, b) {
+            assert!(va.len() >= 3, "half A must have >= 3 vertices, got {}", va.len());
+            assert!(vb.len() >= 3, "half B must have >= 3 vertices, got {}", vb.len());
+            assert_eq!(va.len() + vb.len(), 6, "total vertex count must equal original");
+        } else {
+            panic!("split_polygon should return Polygon variants");
+        }
+    }
+
+    #[test]
+    fn split_polygon_rejects_small_polygon() {
+        let mut rng = seeded();
+        let shape = Shape::Polygon {
+            vertices: vec![(0, 0), (50, 0), (25, 50)],
+            oklab: [0.5, 0.0, 0.0],
+            alpha: 50,
+        };
+        assert!(
+            split_polygon(&shape, &mut rng, 100, 100, 0).is_none(),
+            "split should return None for < 6 vertices"
+        );
+    }
+
+    #[test]
+    fn polygon_angle_crossover_produces_valid_shape() {
+        let mut rng = seeded();
+        let a = Shape::Polygon {
+            vertices: vec![(0, 0), (50, 0), (100, 50), (50, 100), (0, 50)],
+            oklab: [0.5, 0.1, 0.0],
+            alpha: 50,
+        };
+        let b = Shape::Polygon {
+            vertices: vec![(25, 25), (75, 25), (75, 75), (25, 75)],
+            oklab: [0.7, -0.1, 0.1],
+            alpha: 70,
+        };
+        // The random angle may occasionally yield < 3 vertices; retry until one succeeds.
+        let mut found = false;
+        for _ in 0..200 {
+            if let Some(result) = polygon_angle_crossover(&a, &b, &mut rng, 200, 200, 0) {
+                if let Shape::Polygon { vertices, .. } = result {
+                    assert!(vertices.len() >= 3, "crossover result must have >= 3 vertices");
+                    found = true;
+                    break;
+                } else {
+                    panic!("polygon_angle_crossover must return a Polygon");
+                }
+            }
+        }
+        assert!(found, "expected at least one successful crossover in 200 tries");
+    }
+
+    #[test]
+    fn polygon_angle_crossover_rejects_non_polygon() {
+        let mut rng = seeded();
+        let poly = Shape::Polygon {
+            vertices: vec![(0, 0), (50, 0), (25, 50)],
+            oklab: [0.5, 0.0, 0.0],
+            alpha: 50,
+        };
+        let tri = Shape::Triangle {
+            x1: 0, y1: 0, x2: 50, y2: 0, x3: 25, y3: 50,
+            oklab: [0.5, 0.0, 0.0],
+            alpha: 50,
+        };
+        assert!(
+            polygon_angle_crossover(&poly, &tri, &mut rng, 100, 100, 0).is_none(),
+            "crossover must return None when either shape is not a Polygon"
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::annealing::AnnealingState;
 use crate::gene::{BackgroundGene, BlurGene, Gene, MutationConfig, ShapeGene};
 use crate::render::{apply_blur, compute_diff, draw_genes};
-use crate::shapes::Shape;
+use crate::shapes::{Shape, polygon_angle_crossover, split_polygon};
 
 /// A complete candidate solution produced by combining genes.
 pub trait Genome: Clone + Send + Sync {
@@ -102,6 +102,70 @@ impl ShapeGenome {
     }
 }
 
+impl ShapeGenome {
+    /// Recombine via single-point crossover, with optional polygon angle crossover at the boundary.
+    ///
+    /// When the genes adjacent to the crossover point are both `Polygon`s, there is a 50%
+    /// chance of replacing parent-A's boundary gene with an angle-blended hybrid of the two.
+    /// Use this instead of `Genome::recombine` when image dimensions are available.
+    #[must_use]
+    pub fn recombine_configured(&self, other: &Self, rng: &mut impl Rng, config: &MutationConfig) -> Self {
+        let mut a_sorted = self.shapes.clone();
+        let mut b_sorted = other.shapes.clone();
+        a_sorted.sort_unstable_by_key(|g| g.z_order);
+        b_sorted.sort_unstable_by_key(|g| g.z_order);
+
+        let min_len = a_sorted.len().min(b_sorted.len());
+        let shapes = if min_len <= 1 {
+            if a_sorted.len() >= b_sorted.len() {
+                a_sorted
+            } else {
+                b_sorted
+            }
+        } else {
+            let k = rng.random_range(1..min_len);
+            let mut child: Vec<ShapeGene> = a_sorted[..k].to_vec();
+            child.extend_from_slice(&b_sorted[k..]);
+
+            // At the crossover boundary, try angle-based polygon crossover.
+            // child[k-1] came from parent A; child[k] came from parent B.
+            if rng.random_bool(0.5) {
+                if let Some(hybrid) = polygon_angle_crossover(
+                    &a_sorted[k - 1].shape,
+                    &b_sorted[k].shape,
+                    rng,
+                    config.width,
+                    config.height,
+                    config.margin,
+                ) {
+                    let za = a_sorted[k - 1].z_order;
+                    let zb = b_sorted[k].z_order;
+                    let z_order = u32::midpoint(u32::from(za), u32::from(zb)) as u16;
+                    child[k - 1] = ShapeGene { shape: hybrid, z_order };
+                }
+            }
+
+            if child.is_empty() {
+                a_sorted[..1].to_vec()
+            } else {
+                child
+            }
+        };
+
+        let blur = match (&self.blur, &other.blur) {
+            (Some(a), Some(b)) => Some(a.recombine(b, rng)),
+            (Some(b), None) | (None, Some(b)) => {
+                if rng.random_bool(0.5) { Some(b.clone()) } else { None }
+            }
+            (None, None) => None,
+        };
+
+        let background = self.background.recombine(&other.background, rng);
+
+        Self { shapes, blur, background }
+    }
+}
+
 impl Genome for ShapeGenome {
     fn fitness(&self, target: &[f32], width: u32, height: u32, scratch: &mut Vec<f32>) -> f32 {
         let bg = self.background_oklab();
@@ -152,6 +216,42 @@ impl Genome for ShapeGenome {
             let idx = rng.random_range(0..shapes.len());
             shapes.remove(idx);
             return Self { shapes, blur, background };
+        }
+
+        // ~5% chance: split a large polygon into two colour-diverged halves
+        if config.use_polygons && rng.random_range(0..20u32) == 0 {
+            let poly_indices: Vec<usize> = shapes
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| {
+                    matches!(&g.shape, Shape::Polygon { vertices, .. } if vertices.len() >= 6)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if !poly_indices.is_empty() {
+                let idx = poly_indices[rng.random_range(0..poly_indices.len())];
+                if let Some((s_a, s_b)) =
+                    split_polygon(&shapes[idx].shape, rng, config.width, config.height, config.margin)
+                {
+                    let z = shapes[idx].z_order;
+                    let gene_a = ShapeGene { shape: s_a, z_order: z };
+                    let gene_b = ShapeGene { shape: s_b, z_order: z.saturating_add(1) };
+                    let rest_cost: usize = shapes
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != idx)
+                        .map(|(_, g)| g.cost())
+                        .sum();
+                    if rest_cost + gene_a.cost() + gene_b.cost() <= state.max_cost
+                        && rest_cost + gene_a.cost() + gene_b.cost() <= state.max_cost_incremental
+                    {
+                        shapes[idx] = gene_a;
+                        shapes.push(gene_b);
+                        tracing::trace!(mutation = "split-polygon", "split polygon into two colour-diverged halves");
+                        return Self { shapes, blur, background };
+                    }
+                }
+            }
         }
 
         // 5% chance: swap z_orders of two genes (equivalent to reordering)
@@ -351,6 +451,49 @@ mod tests {
             let child = a.recombine(&b, &mut rng);
             assert!(!child.shapes.is_empty(), "recombined genome must not be empty");
         }
+    }
+
+    #[test]
+    fn split_mutation_increases_gene_count() {
+        let mut rng = SmallRng::seed_from_u64(42);
+        let polygon_config = MutationConfig {
+            use_polygons: true,
+            use_triangles: false,
+            use_circles: false,
+            ..sample_config()
+        };
+        // Use a large incremental budget so the split can succeed.
+        let state = AnnealingState::new_from_shape_count(64, 10);
+        let genome = ShapeGenome {
+            shapes: vec![ShapeGene {
+                shape: Shape::Polygon {
+                    vertices: vec![
+                        (0, 0),
+                        (50, 0),
+                        (100, 0),
+                        (100, 50),
+                        (100, 100),
+                        (50, 100),
+                        (0, 100),
+                        (0, 50),
+                    ],
+                    oklab: [0.5, 0.0, 0.0],
+                    alpha: 50,
+                },
+                z_order: 0,
+            }],
+            blur: None,
+            background: BackgroundGene::default(),
+        };
+        let mut found_split = false;
+        for _ in 0..500 {
+            let mutated = genome.mutate(&mut rng, &state, &polygon_config);
+            if mutated.shapes.len() > 1 {
+                found_split = true;
+                break;
+            }
+        }
+        assert!(found_split, "split mutation should fire within 500 attempts");
     }
 
     #[test]

@@ -18,16 +18,16 @@ The dividing line: _file access in the binary, the library works on state_.
 
 ## Architecture
 
-| Crate / Module          | Responsibility                                                                              |
-| ----------------------- | ------------------------------------------------------------------------------------------- |
-| `libshapeme::shapes`    | `Shape` enum (Triangle/Circle/Polygon), normalisation, mutation, random generation          |
-| `libshapeme::gene`      | `Gene` trait, `ShapeGene` (Shape + z_order), `BlurGene`, `MutationConfig`                  |
-| `libshapeme::genome`    | `Genome` trait, `ShapeGenome` (fitness/mutate/recombine); replaces the old `ShapeSet`       |
-| `libshapeme::render`    | Framebuffer rasterisation, `draw_genes`, `apply_blur`, `compute_diff`, `scale_image`        |
-| `libshapeme::annealing` | `AnnealingState` only (mutation logic lives in `ShapeGenome::mutate`)                       |
-| `libshapeme::oklab`     | sRGB↔OKlab conversion (`srgb_u8_to_oklab`, `oklab_to_srgb_u8`, bulk variants)              |
-| `libshapeme::svg`       | `build_svg`, `build_svg_from_genome`, `svg_to_data_url` (no file writes)                    |
-| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O            |
+| Crate / Module          | Responsibility                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| `libshapeme::shapes`    | `Shape` enum (Triangle/Circle/Polygon), normalisation, mutation, random generation    |
+| `libshapeme::gene`      | `Gene` trait, `ShapeGene` (Shape + z_order), `BlurGene`, `MutationConfig`             |
+| `libshapeme::genome`    | `Genome` trait, `ShapeGenome` (fitness/mutate/recombine); replaces the old `ShapeSet` |
+| `libshapeme::render`    | Framebuffer rasterisation, `draw_genes`, `apply_blur`, `compute_diff`, `scale_image`  |
+| `libshapeme::annealing` | `AnnealingState` only (mutation logic lives in `ShapeGenome::mutate`)                 |
+| `libshapeme::oklab`     | sRGB↔OKlab conversion (`srgb_u8_to_oklab`, `oklab_to_srgb_u8`, bulk variants)        |
+| `libshapeme::svg`       | `build_svg`, `build_svg_from_genome`, `svg_to_data_url` (no file writes)              |
+| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O      |
 
 ## Key design decisions
 
@@ -49,11 +49,11 @@ ships a version of the bundled SDL2 that specifies a modern cmake minimum.
 ### OKlab perceptually uniform colour space
 
 All gene colours (`Shape` fields, `BackgroundGene`) are stored as OKlab `[f32; 3]` rather
-than sRGB `u8` triples.  OKlab is a perceptually uniform space (Björn Ottosson, 2020):
+than sRGB `u8` triples. OKlab is a perceptually uniform space (Björn Ottosson, 2020):
 equal distances correspond to equal perceived differences.
 
 - **Diff metric**: `compute_diff` returns RMSE in OKlab space (result in [0, ~1.0],
-  multiplied by 100 for the percentage-diff value used by annealing).  The old sRGB
+  multiplied by 100 for the percentage-diff value used by annealing). The old sRGB
   Euclidean sum divided by `width*height*442` is removed.
 - **Colour mutations**: nudge ±0.02 per OKlab channel — perceptually uniform steps.
 - **Recombination**: arithmetic mean in OKlab is the perceptually correct midpoint.

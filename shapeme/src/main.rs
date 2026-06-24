@@ -711,11 +711,22 @@ fn process(args: &ProcessArgs) -> Result<()> {
         let mut best_offspring_diff: Option<f32> = None;
         let mut best_offspring: Option<ShapeGenome> = None;
 
+        let recombine_config = MutationConfig {
+            width,
+            height,
+            margin: absbest_genome.blur_radius().map_or(0, |r| r.ceil() as i16),
+            mutation_rate: config.mutation_rate.min(1000),
+            use_triangles: config.use_triangles,
+            use_circles: config.use_circles,
+            use_polygons: config.use_polygons,
+            max_polygon_vertices: config.max_shapes.max(6),
+        };
+
         if top_n >= 2 {
             let mut scratch = vec![0.0f32; (width * height * 3) as usize];
             for i in 0..top.len() {
                 for j in (i + 1)..top.len() {
-                    let raw_child = top[i].best_genome.recombine(&top[j].best_genome, &mut rng);
+                    let raw_child = top[i].best_genome.recombine_configured(&top[j].best_genome, &mut rng, &recombine_config);
                     // Trim to budget before fitness, same as run_batch does for every candidate
                     let child = if let Some(max_bytes) = config.max_bytes {
                         trim_genome_to_budget(raw_child, width, height, max_bytes)
