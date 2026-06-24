@@ -22,6 +22,7 @@ use tracing::Level;
 use libshapeme::annealing::AnnealingState;
 use libshapeme::gene::{MutationConfig, ShapeGene, TRIANGLE_COST};
 use libshapeme::genome::{Genome, ShapeGenome};
+use libshapeme::oklab;
 use libshapeme::render::{apply_blur, draw_shapes, scale_image};
 use libshapeme::shapes::{Shape, random_shape};
 use libshapeme::svg::{build_svg, build_svg_from_genome, svg_to_data_url};
@@ -120,8 +121,8 @@ struct ProcessArgs {
 /// to reconstruct the run without any additional CLI flags.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct StoredConfig {
-    /// Scaled RGB24 pixel data (width × height × 3 bytes).
-    image: Vec<u8>,
+    /// Scaled `OKlab` pixel data (width × height × 3 f32 values).
+    image: Vec<f32>,
     width: u32,
     height: u32,
     use_triangles: bool,
@@ -143,16 +144,6 @@ struct Checkpoint {
     config: StoredConfig,
     state: AnnealingState,
     genome: ShapeGenome,
-}
-
-/// Legacy checkpoint format (V1): flat `Vec<Shape>` from before z-ordering.
-///
-/// Kept for read-only migration; `save_binary` always writes `Checkpoint`.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct LegacyCheckpoint {
-    config: StoredConfig,
-    state: AnnealingState,
-    shapes: Vec<Shape>,
 }
 
 /// Load an image (any format supported by the image crate) and return it as an
@@ -200,7 +191,7 @@ fn load_binary(path: &Path) -> Result<Option<(StoredConfig, AnnealingState, Shap
     }
     let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
 
-    // Try current V2 format first
+    // Try current V2 format
     if let Ok((checkpoint, _)) =
         bincode::serde::decode_from_slice::<Checkpoint, _>(&data, bincode::config::standard())
     {
@@ -210,20 +201,6 @@ fn load_binary(path: &Path) -> Result<Option<(StoredConfig, AnnealingState, Shap
             "checkpoint image dimensions do not match pixel data — run `shapeme setup` to recreate"
         );
         return Ok(Some((config, checkpoint.state, checkpoint.genome)));
-    }
-
-    // Fall back to legacy V1 format, migrating shapes to ShapeGenome
-    if let Ok((legacy, _)) =
-        bincode::serde::decode_from_slice::<LegacyCheckpoint, _>(&data, bincode::config::standard())
-    {
-        tracing::info!("migrating legacy V1 checkpoint to V2 (z-order assigned by original draw order)");
-        let config = legacy.config;
-        anyhow::ensure!(
-            config.image.len() == (config.width * config.height * 3) as usize,
-            "checkpoint image dimensions do not match pixel data — run `shapeme setup` to recreate"
-        );
-        let genome = ShapeGenome::from_shapes(legacy.shapes);
-        return Ok(Some((config, legacy.state, genome)));
     }
 
     anyhow::bail!(
@@ -295,11 +272,15 @@ fn setup(args: &SetupArgs) -> Result<()> {
     }
 
     let (raw_pixels, raw_width, raw_height) = load_png(&args.input)?;
-    let (image, width, height) = if args.max_dimension > 0 {
+    // Scale in sRGB u8 BEFORE converting to OKlab: imageops::resize clips negative f32
+    // values, which would zero out the negative a/b OKlab channels (cool/blue colours)
+    // and produce a warm/sepia bias in the reference image.
+    let (scaled_pixels, width, height) = if args.max_dimension > 0 {
         scale_image(raw_pixels, raw_width, raw_height, args.max_dimension)
     } else {
         (raw_pixels, raw_width, raw_height)
     };
+    let image = oklab::image_srgb_to_oklab(&scaled_pixels);
     tracing::info!(width, height, "image loaded");
 
     let max_shapes = args.max_shapes.max(args.initial_shapes);
@@ -331,7 +312,7 @@ fn setup(args: &SetupArgs) -> Result<()> {
 struct DisplayUpdate {
     shapes: Vec<Shape>,
     blur: Option<f32>,
-    background: (u8, u8, u8),
+    background: [f32; 3],
     diff: f32,
     max_cost_incremental: usize,
     generation: i64,
@@ -363,7 +344,7 @@ fn trim_genome_to_budget(genome: ShapeGenome, width: u32, height: u32, max_bytes
             width,
             height,
             blur.as_ref().map(|b| b.radius),
-            (background.r, background.g, background.b),
+            background.oklab,
             true,
         );
         if svg_to_data_url(&svg).len() <= max_bytes || shapes.is_empty() {
@@ -376,7 +357,7 @@ fn trim_genome_to_budget(genome: ShapeGenome, width: u32, height: u32, max_bytes
                 width,
                 height,
                 None,
-                (background.r, background.g, background.b),
+                background.oklab,
                 true,
             );
             if svg_to_data_url(&svg_no_blur).len() <= max_bytes {
@@ -404,7 +385,7 @@ fn run_batch(
     tx: &mpsc::Sender<DisplayUpdate>,
 ) -> BatchResult {
     let mut rng = SmallRng::from_os_rng();
-    let mut fb = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut fb = vec![0.0f32; (config.width * config.height * 3) as usize];
 
     let mut state = start_state.clone();
     if reheated {
@@ -470,7 +451,7 @@ fn run_batch(
                 let _ = tx.send(DisplayUpdate {
                     shapes: sorted_shapes,
                     blur: effective.blur_radius(),
-                    background: effective.background_color(),
+                    background: effective.background_oklab(),
                     diff: percdiff,
                     max_cost_incremental: state.max_cost_incremental,
                     generation: state.generation,
@@ -551,29 +532,29 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
     let mut absbest_genome = init_genome;
 
-    let mut fb = vec![0u8; (width * height * 3) as usize];
-    let (bg_r, bg_g, bg_b) = absbest_genome.background_color();
+    let mut fb = vec![0.0f32; (width * height * 3) as usize];
+    let bg = absbest_genome.background_oklab();
     for pixel in fb.chunks_exact_mut(3) {
-        pixel[0] = bg_r; pixel[1] = bg_g; pixel[2] = bg_b;
+        pixel.copy_from_slice(&bg);
     }
     let absbest_sorted: Vec<Shape> = absbest_genome.sorted_shapes().into_iter().cloned().collect();
     draw_shapes(&mut fb, width, height, &absbest_sorted);
 
     let mut show_original = false;
-    let mut last_display_buf: Vec<u8> = absbest_genome
+    let mut last_display_buf: Vec<f32> = absbest_genome
         .blur_radius()
         .map_or_else(|| fb.clone(), |r| apply_blur(&fb, width, height, r));
 
     if let Some(ctx) = &mut sdl_ctx {
         let blurred = absbest_genome.blur_radius().map(|r| apply_blur(&fb, width, height, r));
         let display = blurred.as_deref().unwrap_or(&fb);
-        let _ = ctx.texture.update(None, display, (width * 3) as usize);
+        let display_rgb = oklab::image_oklab_to_srgb(display);
+        let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
         let _ = ctx.canvas.copy(&ctx.texture, None, None);
         ctx.canvas.present();
         std::thread::sleep(std::time::Duration::from_secs(1));
-        let _ = ctx
-            .texture
-            .update(None, &config.image, (width * 3) as usize);
+        let image_rgb = oklab::image_oklab_to_srgb(&config.image);
+        let _ = ctx.texture.update(None, &image_rgb, (width * 3) as usize);
         let _ = ctx.canvas.copy(&ctx.texture, None, None);
         ctx.canvas.present();
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -616,9 +597,8 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 if update.diff < round_display_diff {
                     round_display_diff = update.diff;
                     if let Some(ctx) = &mut sdl_ctx {
-                        let (bg_r, bg_g, bg_b) = update.background;
                         for pixel in fb.chunks_exact_mut(3) {
-                            pixel[0] = bg_r; pixel[1] = bg_g; pixel[2] = bg_b;
+                            pixel.copy_from_slice(&update.background);
                         }
                         draw_shapes(&mut fb, width, height, &update.shapes);
                         let blurred = update.blur.map(|r| apply_blur(&fb, width, height, r));
@@ -626,7 +606,8 @@ fn process(args: &ProcessArgs) -> Result<()> {
                         last_display_buf.clear();
                         last_display_buf.extend_from_slice(display);
                         if !show_original {
-                            let _ = ctx.texture.update(None, display, (width * 3) as usize);
+                            let display_rgb = oklab::image_oklab_to_srgb(display);
+                            let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
                             let _ = ctx.canvas.copy(&ctx.texture, None, None);
                             ctx.canvas.present();
                         }
@@ -659,12 +640,12 @@ fn process(args: &ProcessArgs) -> Result<()> {
                             ..
                         } => {
                             show_original = !show_original;
-                            let buf: &[u8] = if show_original {
-                                &config.image
+                            let rgb = if show_original {
+                                oklab::image_oklab_to_srgb(&config.image)
                             } else {
-                                &last_display_buf
+                                oklab::image_oklab_to_srgb(&last_display_buf)
                             };
-                            let _ = ctx.texture.update(None, buf, (width * 3) as usize);
+                            let _ = ctx.texture.update(None, &rgb, (width * 3) as usize);
                             let _ = ctx.canvas.copy(&ctx.texture, None, None);
                             ctx.canvas.present();
                         }
@@ -678,9 +659,8 @@ fn process(args: &ProcessArgs) -> Result<()> {
                     if update.diff < round_display_diff {
                         round_display_diff = update.diff;
                         if let Some(ctx) = &mut sdl_ctx {
-                            let (bg_r, bg_g, bg_b) = update.background;
                             for pixel in fb.chunks_exact_mut(3) {
-                                pixel[0] = bg_r; pixel[1] = bg_g; pixel[2] = bg_b;
+                                pixel.copy_from_slice(&update.background);
                             }
                             draw_shapes(&mut fb, width, height, &update.shapes);
                             let blurred = update.blur.map(|r| apply_blur(&fb, width, height, r));
@@ -688,7 +668,8 @@ fn process(args: &ProcessArgs) -> Result<()> {
                             last_display_buf.clear();
                             last_display_buf.extend_from_slice(display);
                             if !show_original {
-                                let _ = ctx.texture.update(None, display, (width * 3) as usize);
+                                let display_rgb = oklab::image_oklab_to_srgb(display);
+                                let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
                                 let _ = ctx.canvas.copy(&ctx.texture, None, None);
                                 ctx.canvas.present();
                             }
@@ -731,7 +712,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
         let mut best_offspring: Option<ShapeGenome> = None;
 
         if top_n >= 2 {
-            let mut scratch = vec![0u8; (width * height * 3) as usize];
+            let mut scratch = vec![0.0f32; (width * height * 3) as usize];
             for i in 0..top.len() {
                 for j in (i + 1)..top.len() {
                     let raw_child = top[i].best_genome.recombine(&top[j].best_genome, &mut rng);
@@ -782,9 +763,9 @@ fn process(args: &ProcessArgs) -> Result<()> {
         );
 
         if let Some(ctx) = &mut sdl_ctx {
-            let (bg_r, bg_g, bg_b) = absbest_genome.background_color();
+            let bg = absbest_genome.background_oklab();
             for pixel in fb.chunks_exact_mut(3) {
-                pixel[0] = bg_r; pixel[1] = bg_g; pixel[2] = bg_b;
+                pixel.copy_from_slice(&bg);
             }
             let sorted: Vec<Shape> = absbest_genome.sorted_shapes().into_iter().cloned().collect();
             draw_shapes(&mut fb, width, height, &sorted);
@@ -793,7 +774,8 @@ fn process(args: &ProcessArgs) -> Result<()> {
             last_display_buf.clear();
             last_display_buf.extend_from_slice(display);
             if !show_original {
-                let _ = ctx.texture.update(None, display, (width * 3) as usize);
+                let display_rgb = oklab::image_oklab_to_srgb(display);
+                let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
                 let _ = ctx.canvas.copy(&ctx.texture, None, None);
                 ctx.canvas.present();
             }

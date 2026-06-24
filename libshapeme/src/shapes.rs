@@ -1,12 +1,16 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::oklab;
+
 pub(crate) const MINALPHA: u8 = 1;
 pub(crate) const MAXALPHA: u8 = 100;
 
 /// A geometric primitive drawn into the framebuffer with alpha blending.
 ///
-/// Alpha is stored as an integer percentage (1–100) and divided by 100.0 on render.
+/// Colour is stored as `OKlab` [L, a, b] f32 values for perceptually uniform mutation
+/// and interpolation.  Alpha is still stored as an integer percentage (1–100) and
+/// divided by 100.0 on render.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Shape {
     /// Filled triangle with vertices sorted by y-coordinate for the rasteriser.
@@ -23,12 +27,8 @@ pub enum Shape {
         x3: i16,
         /// Third vertex y coordinate.
         y3: i16,
-        /// Red channel (0–255).
-        r: u8,
-        /// Green channel (0–255).
-        g: u8,
-        /// Blue channel (0–255).
-        b: u8,
+        /// Colour in `OKlab` [L, a, b].
+        oklab: [f32; 3],
         /// Alpha as an integer percentage (1–100).
         alpha: u8,
     },
@@ -43,12 +43,8 @@ pub enum Shape {
         cy: i16,
         /// Radius in pixels.
         radius: i16,
-        /// Red channel (0–255).
-        r: u8,
-        /// Green channel (0–255).
-        g: u8,
-        /// Blue channel (0–255).
-        b: u8,
+        /// Colour in `OKlab` [L, a, b].
+        oklab: [f32; 3],
         /// Alpha as an integer percentage (1–100).
         alpha: u8,
     },
@@ -56,12 +52,8 @@ pub enum Shape {
     Polygon {
         /// Vertices in order; must contain at least 3 entries.
         vertices: Vec<(i16, i16)>,
-        /// Red channel (0–255).
-        r: u8,
-        /// Green channel (0–255).
-        g: u8,
-        /// Blue channel (0–255).
-        b: u8,
+        /// Colour in `OKlab` [L, a, b].
+        oklab: [f32; 3],
         /// Alpha as an integer percentage (1–100).
         alpha: u8,
     },
@@ -161,12 +153,25 @@ fn select_shape_type(
     kinds.remove(idx)
 }
 
-fn random_color(rng: &mut impl Rng) -> (u8, u8, u8, u8) {
+fn random_color(rng: &mut impl Rng) -> ([f32; 3], u8) {
     let r = rng.random::<u8>();
     let g = rng.random::<u8>();
     let b = rng.random::<u8>();
     let alpha = rand_between(rng, MINALPHA as i32, MAXALPHA as i32) as u8;
-    (r, g, b, alpha)
+    (oklab::srgb_u8_to_oklab(r, g, b), alpha)
+}
+
+/// Nudge a single `OKlab` channel by a small random delta.
+///
+/// L is clamped to [0, 1]; a and b are left unclamped since out-of-gamut values
+/// are silently clamped to the nearest sRGB colour at render/SVG time.
+fn nudge_oklab(rng: &mut impl Rng, lab: [f32; 3]) -> [f32; 3] {
+    let mut delta = || (rng.random::<f32>() * 2.0 - 1.0) * 0.02;
+    [
+        (lab[0] + delta()).clamp(0.0, 1.0),
+        lab[1] + delta(),
+        lab[2] + delta(),
+    ]
 }
 
 /// Generate a random shape within the image bounds, extended by `margin` on all sides.
@@ -180,7 +185,7 @@ pub fn random_shape(
     margin: i16,
 ) -> Shape {
     let kind = select_shape_type(rng, use_triangles, use_circles, use_polygons);
-    let (r, g, b, alpha) = random_color(rng);
+    let (oklab, alpha) = random_color(rng);
     let mut shape = match kind {
         ShapeKind::Triangle => Shape::Triangle {
             x1: (rng.random::<u32>() % width) as i16,
@@ -189,18 +194,14 @@ pub fn random_shape(
             y2: (rng.random::<u32>() % height) as i16,
             x3: (rng.random::<u32>() % width) as i16,
             y3: (rng.random::<u32>() % height) as i16,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         },
         ShapeKind::Circle => Shape::Circle {
             cx: (rng.random::<u32>() % width) as i16,
             cy: (rng.random::<u32>() % height) as i16,
             radius: (rng.random::<u32>() % width) as i16,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         },
         ShapeKind::Polygon => {
@@ -215,9 +216,7 @@ pub fn random_shape(
                 .collect();
             Shape::Polygon {
                 vertices,
-                r,
-                g,
-                b,
+                oklab,
                 alpha,
             }
         }
@@ -244,7 +243,7 @@ pub(crate) fn random_small_shape(
     let kind = select_shape_type(rng, use_triangles, use_circles, use_polygons);
     let x = (rng.random::<u32>() % width) as i32;
     let y = (rng.random::<u32>() % height) as i32;
-    let (r, g, b, alpha) = random_color(rng);
+    let (oklab, alpha) = random_color(rng);
     let mut shape = match kind {
         ShapeKind::Triangle => Shape::Triangle {
             x1: (x + rand_between(rng, -delta, delta)) as i16,
@@ -253,18 +252,14 @@ pub(crate) fn random_small_shape(
             y2: (y + rand_between(rng, -delta, delta)) as i16,
             x3: (x + rand_between(rng, -delta, delta)) as i16,
             y3: (y + rand_between(rng, -delta, delta)) as i16,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         },
         ShapeKind::Circle => Shape::Circle {
             cx: x as i16,
             cy: y as i16,
             radius: rand_between(rng, 1, delta) as i16,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         },
         ShapeKind::Polygon => {
@@ -279,9 +274,7 @@ pub(crate) fn random_small_shape(
                 .collect();
             Shape::Polygon {
                 vertices,
-                r,
-                g,
-                b,
+                oklab,
                 alpha,
             }
         }
@@ -307,9 +300,7 @@ pub(crate) fn mutate_shape(
             y2,
             x3,
             y3,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         } => match rng.random_range(0..6u32) {
             0 => {
@@ -340,14 +331,11 @@ pub(crate) fn mutate_shape(
                 normalize(shape, width, height, margin);
             }
             3 => {
-                *r = rng.random();
-                *g = rng.random();
-                *b = rng.random();
+                let (new_oklab, _) = random_color(rng);
+                *oklab = new_oklab;
             }
             4 => {
-                *r = (*r as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
-                *g = (*g as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
-                *b = (*b as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
+                *oklab = nudge_oklab(rng, *oklab);
             }
             _ => {
                 *alpha = rand_between(rng, MINALPHA as i32, MAXALPHA as i32) as u8;
@@ -357,9 +345,7 @@ pub(crate) fn mutate_shape(
             cx,
             cy,
             radius,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         } => match rng.random_range(0..6u32) {
             0 => {
@@ -381,14 +367,11 @@ pub(crate) fn mutate_shape(
                 normalize(shape, width, height, margin);
             }
             3 => {
-                *r = rng.random();
-                *g = rng.random();
-                *b = rng.random();
+                let (new_oklab, _) = random_color(rng);
+                *oklab = new_oklab;
             }
             4 => {
-                *r = (*r as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
-                *g = (*g as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
-                *b = (*b as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
+                *oklab = nudge_oklab(rng, *oklab);
             }
             _ => {
                 *alpha = rand_between(rng, MINALPHA as i32, MAXALPHA as i32) as u8;
@@ -396,9 +379,7 @@ pub(crate) fn mutate_shape(
         },
         Shape::Polygon {
             vertices,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         } => match rng.random_range(0..8u32) {
             0 => {
@@ -428,14 +409,11 @@ pub(crate) fn mutate_shape(
                 normalize(shape, width, height, margin);
             }
             3 => {
-                *r = rng.random();
-                *g = rng.random();
-                *b = rng.random();
+                let (new_oklab, _) = random_color(rng);
+                *oklab = new_oklab;
             }
             4 => {
-                *r = (*r as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
-                *g = (*g as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
-                *b = (*b as i32 + rand_between(rng, -5, 5)).clamp(0, 255) as u8;
+                *oklab = nudge_oklab(rng, *oklab);
             }
             5 => {
                 *alpha = rand_between(rng, MINALPHA as i32, MAXALPHA as i32) as u8;
@@ -488,6 +466,10 @@ mod tests {
         SmallRng::seed_from_u64(42)
     }
 
+    fn black_oklab() -> [f32; 3] {
+        [0.0, 0.0, 0.0]
+    }
+
     #[test]
     fn triangle_normalise_sorts_by_y() {
         let mut shape = Shape::Triangle {
@@ -497,9 +479,7 @@ mod tests {
             y2: 10,
             x3: 30,
             y3: 20,
-            r: 0,
-            g: 0,
-            b: 0,
+            oklab: black_oklab(),
             alpha: 50,
         };
         normalize(&mut shape, 100, 100, 0);
@@ -519,9 +499,7 @@ mod tests {
             cx: -200,
             cy: 300,
             radius: 100,
-            r: 0,
-            g: 0,
-            b: 0,
+            oklab: black_oklab(),
             alpha: 50,
         };
         normalize(&mut shape, 50, 50, 0);
@@ -538,9 +516,7 @@ mod tests {
     fn polygon_normalise_clamps_vertices() {
         let mut shape = Shape::Polygon {
             vertices: vec![(-200, 300), (100, 100), (50, -100)],
-            r: 0,
-            g: 0,
-            b: 0,
+            oklab: black_oklab(),
             alpha: 50,
         };
         normalize(&mut shape, 50, 50, 0);
@@ -564,9 +540,7 @@ mod tests {
             y2: 20,
             x3: 30,
             y3: 30,
-            r: 128,
-            g: 128,
-            b: 128,
+            oklab: black_oklab(),
             alpha: 50,
         };
         for _ in 0..1000 {
@@ -591,9 +565,7 @@ mod tests {
             y2: 5,
             x3: 5,
             y3: 104,
-            r: 0,
-            g: 0,
-            b: 0,
+            oklab: black_oklab(),
             alpha: 50,
         };
         normalize(&mut shape, 100, 100, margin);
@@ -624,9 +596,7 @@ mod tests {
         let mut rng = seeded();
         let mut shape = Shape::Polygon {
             vertices: vec![(0, 0), (50, 0), (25, 50)],
-            r: 128,
-            g: 128,
-            b: 128,
+            oklab: black_oklab(),
             alpha: 50,
         };
         for _ in 0..1000 {
@@ -648,9 +618,7 @@ mod tests {
         let mut rng = seeded();
         let mut shape = Shape::Polygon {
             vertices: vec![(0, 0), (50, 0), (25, 50)],
-            r: 128,
-            g: 128,
-            b: 128,
+            oklab: black_oklab(),
             alpha: 50,
         };
         let mut saw_split = false;
@@ -685,9 +653,7 @@ mod tests {
         let cap = 5usize;
         let mut shape = Shape::Polygon {
             vertices: vec![(0, 0), (50, 0), (25, 50)],
-            r: 128,
-            g: 128,
-            b: 128,
+            oklab: black_oklab(),
             alpha: 50,
         };
         for _ in 0..5000 {
@@ -707,9 +673,7 @@ mod tests {
         // Vertices in clockwise order (wrong); normalise should sort them by angle.
         let mut shape = Shape::Polygon {
             vertices: vec![(50, 0), (100, 50), (50, 100), (0, 50)],
-            r: 0,
-            g: 0,
-            b: 0,
+            oklab: black_oklab(),
             alpha: 50,
         };
         normalize(&mut shape, 200, 200, 0);

@@ -22,9 +22,9 @@ use crate::shapes::Shape;
 pub trait Genome: Clone + Send + Sync {
     /// Compute the percentage diff between this genome's rendering and `target`.
     ///
-    /// `scratch` is zeroed and reused by the caller between calls — avoids a per-call
-    /// allocation in the hot annealing loop.
-    fn fitness(&self, target: &[u8], width: u32, height: u32, scratch: &mut Vec<u8>) -> f32;
+    /// `target` and `scratch` are `OKlab` f32 buffers (3 floats per pixel).
+    /// `scratch` is reused by the caller between calls — avoids a per-call allocation.
+    fn fitness(&self, target: &[f32], width: u32, height: u32, scratch: &mut Vec<f32>) -> f32;
 
     /// Return a mutated copy of this genome.
     #[must_use]
@@ -89,32 +89,31 @@ impl ShapeGenome {
         self.blur.as_ref().map(|b| b.radius)
     }
 
-    /// Background colour as an RGB triple.
+    /// Background colour in `OKlab` [L, a, b].
     #[must_use]
-    pub fn background_color(&self) -> (u8, u8, u8) {
-        (self.background.r, self.background.g, self.background.b)
+    pub fn background_oklab(&self) -> [f32; 3] {
+        self.background.oklab
     }
 
     /// Total approximate byte cost of all shape genes in this genome.
     #[must_use]
     pub fn total_cost(&self) -> usize {
-        self.shapes.iter().map(|g| g.cost()).sum()
+        self.shapes.iter().map(ShapeGene::cost).sum()
     }
 }
 
 impl Genome for ShapeGenome {
-    fn fitness(&self, target: &[u8], width: u32, height: u32, scratch: &mut Vec<u8>) -> f32 {
-        let (bg_r, bg_g, bg_b) = self.background_color();
+    fn fitness(&self, target: &[f32], width: u32, height: u32, scratch: &mut Vec<f32>) -> f32 {
+        let bg = self.background_oklab();
         for pixel in scratch.chunks_exact_mut(3) {
-            pixel[0] = bg_r;
-            pixel[1] = bg_g;
-            pixel[2] = bg_b;
+            pixel.copy_from_slice(&bg);
         }
         draw_genes(scratch, width, height, &self.shapes);
         let blurred_opt = self.blur_radius().map(|r| apply_blur(scratch, width, height, r));
-        let display: &[u8] = blurred_opt.as_deref().unwrap_or(scratch);
+        let display: &[f32] = blurred_opt.as_deref().unwrap_or(scratch);
         let diff = compute_diff(target, display);
-        diff as f32 / (width * height) as f32 / 442.0 * 100.0
+        // RMSE is in [0, ~1.0]; multiply by 100 to express as a percentage.
+        diff as f32 * 100.0
     }
 
     #[allow(
@@ -136,7 +135,7 @@ impl Genome for ShapeGenome {
         // 10% chance: add a new gene (respects incremental cost cap)
         if rng.random_range(0..10u32) == 0 {
             let candidate = ShapeGene::random(rng, config);
-            let current_cost: usize = shapes.iter().map(|g| g.cost()).sum();
+            let current_cost: usize = shapes.iter().map(ShapeGene::cost).sum();
             if current_cost + candidate.cost() <= state.max_cost
                 && current_cost + candidate.cost() <= state.max_cost_incremental
             {
@@ -268,9 +267,7 @@ mod tests {
                         y2: 0,
                         x3: 25,
                         y3: 50,
-                        r: 255,
-                        g: 0,
-                        b: 0,
+                        oklab: [0.6279, -0.2516, 0.0000], // ~red in OKlab
                         alpha: 50,
                     },
                     z_order: 100,
@@ -283,9 +280,7 @@ mod tests {
                         y2: 10,
                         x3: 35,
                         y3: 60,
-                        r: 0,
-                        g: 255,
-                        b: 0,
+                        oklab: [0.8664, -0.2334, 0.1795], // ~green in OKlab
                         alpha: 50,
                     },
                     z_order: 200,
@@ -303,18 +298,14 @@ mod tests {
                 cx: 10,
                 cy: 10,
                 radius: 5,
-                r: 255,
-                g: 0,
-                b: 0,
+                oklab: [0.6279, -0.2516, 0.0000],
                 alpha: 50,
             },
             Shape::Circle {
                 cx: 20,
                 cy: 20,
                 radius: 5,
-                r: 0,
-                g: 255,
-                b: 0,
+                oklab: [0.8664, -0.2334, 0.1795],
                 alpha: 50,
             },
         ];
@@ -335,9 +326,7 @@ mod tests {
                     y2: 0,
                     x3: 25,
                     y3: 50,
-                    r: 128,
-                    g: 128,
-                    b: 128,
+                    oklab: [0.5987, 0.0000, 0.0000], // mid-grey in OKlab
                     alpha: 50,
                 },
                 z_order: 0,
@@ -369,8 +358,8 @@ mod tests {
         let genome = sample_genome();
         let w = 10u32;
         let h = 10u32;
-        let target = vec![0u8; (w * h * 3) as usize];
-        let mut scratch = vec![0u8; (w * h * 3) as usize];
+        let target = vec![0.0f32; (w * h * 3) as usize];
+        let mut scratch = vec![0.0f32; (w * h * 3) as usize];
         let f = genome.fitness(&target, w, h, &mut scratch);
         assert!(f >= 0.0, "fitness must be non-negative: {f}");
     }

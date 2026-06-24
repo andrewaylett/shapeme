@@ -25,6 +25,7 @@ The dividing line: _file access in the binary, the library works on state_.
 | `libshapeme::genome`    | `Genome` trait, `ShapeGenome` (fitness/mutate/recombine); replaces the old `ShapeSet`       |
 | `libshapeme::render`    | Framebuffer rasterisation, `draw_genes`, `apply_blur`, `compute_diff`, `scale_image`        |
 | `libshapeme::annealing` | `AnnealingState` only (mutation logic lives in `ShapeGenome::mutate`)                       |
+| `libshapeme::oklab`     | sRGB↔OKlab conversion (`srgb_u8_to_oklab`, `oklab_to_srgb_u8`, bulk variants)              |
 | `libshapeme::svg`       | `build_svg`, `build_svg_from_genome`, `svg_to_data_url` (no file writes)                    |
 | `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O            |
 
@@ -45,11 +46,33 @@ CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 This is harmless on older cmake versions and should be retained until sdl2-sys
 ships a version of the bundled SDL2 that specifies a modern cmake minimum.
 
-### Diff percentage constant: 442, not 422
+### OKlab perceptually uniform colour space
 
-The C code comment says "422" but the computation uses **442** (`width*height*442`).
-442 is the correct maximum per-pixel distance: `⌊√(255²×3)⌋ = 441`, rounded up
-to 442. The Rust port uses 442 and the comment corrects the original typo.
+All gene colours (`Shape` fields, `BackgroundGene`) are stored as OKlab `[f32; 3]` rather
+than sRGB `u8` triples.  OKlab is a perceptually uniform space (Björn Ottosson, 2020):
+equal distances correspond to equal perceived differences.
+
+- **Diff metric**: `compute_diff` returns RMSE in OKlab space (result in [0, ~1.0],
+  multiplied by 100 for the percentage-diff value used by annealing).  The old sRGB
+  Euclidean sum divided by `width*height*442` is removed.
+- **Colour mutations**: nudge ±0.02 per OKlab channel — perceptually uniform steps.
+- **Recombination**: arithmetic mean in OKlab is the perceptually correct midpoint.
+- **Framebuffers**: all internal buffers are `Vec<f32>` (3 floats per pixel, OKlab).
+- **Output paths**: SDL textures and SVG output convert OKlab → sRGB u8 at the last step.
+- **Image load pipeline** (`setup`): PNG → sRGB u8 → `scale_image` (Lanczos3 in sRGB u8)
+  → `image_srgb_to_oklab` → OKlab f32 → `StoredConfig.image`.
+  Scaling is done in sRGB u8 **before** the OKlab conversion because `imageops::resize`
+  clips negative `f32` values to 0, which would zero the negative `a`/`b` channels of
+  cool/blue pixels and produce a warm (sepia) bias in the stored reference.
+- **Checkpoint compat**: `StoredConfig.image` changed from `Vec<u8>` to `Vec<f32>`.
+  Existing checkpoints are incompatible; re-run `shapeme setup`.
+- **Legacy V1 checkpoint migration** (flat `Vec<Shape>`) was removed — those checkpoints
+  could not be decoded with the new shape type regardless.
+
+### Diff percentage constant: 442, not 422 (historical, now removed)
+
+Pre-OKlab, the C code comment said "422" but the computation used **442** (`width*height*442`).
+With the OKlab RMSE metric this constant is no longer needed; the note is kept for history.
 
 ### Setup/process split
 
@@ -152,7 +175,10 @@ SDL display and checkpoint saves happen on the main thread between rounds.
 ### Polygon cost model and vertex cap
 
 Gene budget is tracked in approximate bincode byte units rather than raw shape count.
-`TRIANGLE_COST = 22`, `CIRCLE_COST = 16`, `POLYGON_BASE_COST = 18`, `POLYGON_VERTEX_COST = 4`.
+`TRIANGLE_COST = 21`, `CIRCLE_COST = 18`, `POLYGON_BASE_COST = 16`, `POLYGON_VERTEX_COST = 4`.
+(Costs increased from pre-OKlab values because colours are now 12-byte `[f32; 3]` not 3-byte u8;
+bincode v2 uses varint encoding so exact sizes vary with coordinate magnitude — the constants
+approximate typical values for a 256×256 image.)
 CLI `--max-shapes N` is stored as `max_cost = N × TRIANGLE_COST` in `AnnealingState` so the
 user-visible "shapes" concept is preserved while the budget correctly penalises complex polygons.
 

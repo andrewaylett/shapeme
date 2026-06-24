@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use crate::genome::ShapeGenome;
+use crate::oklab;
 use crate::shapes::Shape;
 
 /// Build an SVG string representing the given shapes.
@@ -8,16 +9,17 @@ use crate::shapes::Shape;
 /// `blur_radius` (Gaussian sigma) wraps all content in a `<feGaussianBlur>` filter.
 /// `compact` omits the XML declaration and DOCTYPE, uses single-quoted attributes,
 /// and produces a single line — suitable for embedding in a data URL.
+/// Shape colours are converted from `OKlab` to sRGB at output time.
 #[must_use]
 pub fn build_svg(
     shapes: &[Shape],
     width: u32,
     height: u32,
     blur_radius: Option<f32>,
-    background: (u8, u8, u8),
+    background: [f32; 3],
     compact: bool,
 ) -> String {
-    let (bg_r, bg_g, bg_b) = background;
+    let [bg_r, bg_g, bg_b] = oklab::oklab_to_srgb_u8(background);
     let mut s = String::new();
 
     if compact {
@@ -104,11 +106,10 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
             y2,
             x3,
             y3,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         } => {
+            let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             if compact {
                 write!(
@@ -132,11 +133,10 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
             cx,
             cy,
             radius,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         } => {
+            let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             if compact {
                 write!(
@@ -158,11 +158,10 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
         }
         Shape::Polygon {
             vertices,
-            r,
-            g,
-            b,
+            oklab,
             alpha,
         } => {
+            let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             let pts: String = vertices
                 .iter()
@@ -196,7 +195,7 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
 #[must_use]
 pub fn build_svg_from_genome(genome: &ShapeGenome, width: u32, height: u32, compact: bool) -> String {
     let shapes: Vec<Shape> = genome.sorted_shapes().into_iter().cloned().collect();
-    build_svg(&shapes, width, height, genome.blur_radius(), genome.background_color(), compact)
+    build_svg(&shapes, width, height, genome.blur_radius(), genome.background_oklab(), compact)
 }
 
 /// Percent-encode a compact SVG string for use as a `data:image/svg+xml,` URL.
@@ -227,16 +226,14 @@ mod tests {
             y2: 0,
             x3: 5,
             y3: 10,
-            r: 255,
-            g: 0,
-            b: 0,
+            oklab: [0.6279, -0.2516, 0.0000], // ~red in OKlab
             alpha: 50,
         }]
     }
 
     #[test]
     fn build_svg_compact_has_viewbox_and_preserveaspectratio() {
-        let svg = build_svg(&sample_triangle(), 100, 200, None, (0, 0, 0), true);
+        let svg = build_svg(&sample_triangle(), 100, 200, None, [0.0, 0.0, 0.0], true);
         assert!(
             svg.contains("viewBox='0 0 100 200'"),
             "missing viewBox: {svg}"
@@ -249,13 +246,13 @@ mod tests {
 
     #[test]
     fn build_svg_compact_is_single_line() {
-        let svg = build_svg(&sample_triangle(), 100, 100, Some(4.0), (0, 0, 0), true);
+        let svg = build_svg(&sample_triangle(), 100, 100, Some(4.0), [0.0, 0.0, 0.0], true);
         assert!(!svg.contains('\n'), "compact SVG must not contain newlines");
     }
 
     #[test]
     fn build_svg_compact_includes_blur_filter() {
-        let svg = build_svg(&sample_triangle(), 100, 100, Some(8.0), (0, 0, 0), true);
+        let svg = build_svg(&sample_triangle(), 100, 100, Some(8.0), [0.0, 0.0, 0.0], true);
         assert!(svg.contains("feGaussianBlur"), "missing blur filter: {svg}");
         assert!(
             svg.contains("stdDeviation='8'"),
@@ -265,7 +262,7 @@ mod tests {
 
     #[test]
     fn build_svg_verbose_has_viewbox() {
-        let svg = build_svg(&sample_triangle(), 100, 200, None, (0, 0, 0), false);
+        let svg = build_svg(&sample_triangle(), 100, 200, None, [0.0, 0.0, 0.0], false);
         assert!(
             svg.contains("viewBox=\"0 0 100 200\""),
             "missing viewBox: {svg}"

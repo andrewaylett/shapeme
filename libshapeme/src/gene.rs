@@ -14,17 +14,21 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::oklab;
 use crate::shapes::{Shape, mutate_shape, random_shape, random_small_shape};
 
 /// Approximate bincode byte cost of a `ShapeGene` wrapping a Triangle.
 ///
 /// Used as the base budget unit: `--max-shapes N` → `max_cost = N × TRIANGLE_COST`.
-pub const TRIANGLE_COST: usize = 22;
+/// Colours are stored as [f32; 3] (12 bytes) in `OKlab`.  Bincode v2 uses varint encoding
+/// for integer fields, so actual sizes vary with coordinate magnitude; these constants
+/// approximate the typical encoding for coordinates in a 256×256 image.
+pub const TRIANGLE_COST: usize = 21;
 /// Approximate bincode byte cost of a `ShapeGene` wrapping a Circle.
-pub const CIRCLE_COST: usize = 16;
+pub const CIRCLE_COST: usize = 18;
 /// Approximate bincode byte cost of a `ShapeGene` wrapping a Polygon, excluding per-vertex cost.
-pub const POLYGON_BASE_COST: usize = 18;
-/// Additional cost per polygon vertex.
+pub const POLYGON_BASE_COST: usize = 16;
+/// Additional cost per polygon vertex (one (i16, i16) pair ≈ 4 bytes for typical coordinates).
 pub const POLYGON_VERTEX_COST: usize = 4;
 
 /// Parameters needed by gene-level mutation operations.
@@ -47,7 +51,7 @@ pub struct MutationConfig {
     pub use_circles: bool,
     /// Whether polygon shapes are in use for this run.
     pub use_polygons: bool,
-    /// Maximum number of vertices a single Polygon gene may grow to via split_edge.
+    /// Maximum number of vertices a single Polygon gene may grow to via `split_edge`.
     pub max_polygon_vertices: usize,
 }
 
@@ -189,41 +193,41 @@ impl ShapeGene {
 /// An evolving background colour (always fully opaque).
 ///
 /// No alpha — the background fills the canvas before any shapes are composited on top.
-/// `Default` gives black, preserving existing behaviour for old checkpoints without this field.
+/// Colour is stored in `OKlab` [L, a, b] for perceptually uniform mutation and correct
+/// midpoint interpolation during recombination.
+/// `Default` gives [0,0,0] — pure black in `OKlab` — preserving existing behaviour for
+/// old checkpoints without this field.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BackgroundGene {
-    /// Red channel (0–255).
-    pub r: u8,
-    /// Green channel (0–255).
-    pub g: u8,
-    /// Blue channel (0–255).
-    pub b: u8,
+    /// Colour in `OKlab` [L, a, b].
+    pub oklab: [f32; 3],
 }
 
 impl Gene for BackgroundGene {
     fn mutate(&self, rng: &mut impl Rng, _config: &MutationConfig) -> Self {
         if rng.random_bool(0.5) {
-            // Full random replacement
-            Self {
-                r: rng.random(),
-                g: rng.random(),
-                b: rng.random(),
-            }
+            // Full random replacement via a random sRGB colour
+            let r: u8 = rng.random();
+            let g: u8 = rng.random();
+            let b: u8 = rng.random();
+            Self { oklab: oklab::srgb_u8_to_oklab(r, g, b) }
         } else {
-            // Small nudge on each channel
-            let mut nudge = |v: u8| -> u8 {
-                let delta = rng.random_range(0u8..=5u8);
-                if rng.random_bool(0.5) { v.saturating_add(delta) } else { v.saturating_sub(delta) }
-            };
-            Self { r: nudge(self.r), g: nudge(self.g), b: nudge(self.b) }
+            // Small perceptually uniform nudge on each OKlab channel
+            let mut delta = || (rng.random::<f32>() * 2.0 - 1.0) * 0.02;
+            Self {
+                oklab: [
+                    (self.oklab[0] + delta()).clamp(0.0, 1.0),
+                    self.oklab[1] + delta(),
+                    self.oklab[2] + delta(),
+                ],
+            }
         }
     }
 
     fn recombine(&self, other: &Self, _rng: &mut impl Rng) -> Self {
+        // Arithmetic mean in OKlab is the perceptually correct midpoint.
         Self {
-            r: u8::midpoint(self.r, other.r),
-            g: u8::midpoint(self.g, other.g),
-            b: u8::midpoint(self.b, other.b),
+            oklab: std::array::from_fn(|i| f32::midpoint(self.oklab[i], other.oklab[i])),
         }
     }
 }
@@ -255,5 +259,32 @@ impl Gene for BlurGene {
         Self {
             radius: f32::midpoint(self.radius, other.radius),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shapes::Shape;
+
+    #[test]
+    fn gene_costs_are_in_plausible_range() {
+        // Actual encoded sizes vary with coordinate magnitude (bincode v2 uses varint).
+        // Constants are approximate; this test verifies they are in the right ballpark.
+        let triangle_gene = ShapeGene {
+            shape: Shape::Triangle { x1: 0, y1: 0, x2: 50, y2: 0, x3: 25, y3: 50, oklab: [0.5, 0.0, 0.0], alpha: 50 },
+            z_order: 100,
+        };
+        let circle_gene = ShapeGene {
+            shape: Shape::Circle { cx: 25, cy: 25, radius: 10, oklab: [0.5, 0.0, 0.0], alpha: 50 },
+            z_order: 100,
+        };
+        let triangle_bytes = bincode::serde::encode_to_vec(&triangle_gene, bincode::config::standard()).expect("encode").len();
+        let circle_bytes = bincode::serde::encode_to_vec(&circle_gene, bincode::config::standard()).expect("encode").len();
+        // Allow 50% variance: constants are heuristics for a 256×256 image with typical coords.
+        assert!(triangle_bytes <= TRIANGLE_COST * 3 / 2, "TRIANGLE_COST far off: actual={triangle_bytes}, const={TRIANGLE_COST}");
+        assert!(circle_bytes <= CIRCLE_COST * 3 / 2, "CIRCLE_COST far off: actual={circle_bytes}, const={CIRCLE_COST}");
+        // Triangle should cost more than circle (extra coordinates)
+        assert!(TRIANGLE_COST > CIRCLE_COST, "triangle must cost more than circle");
     }
 }

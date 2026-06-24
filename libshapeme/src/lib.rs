@@ -16,3 +16,5 @@ pub mod render;
 pub mod shapes;
 /// SVG generation and data URL encoding.
 pub mod svg;
+/// OKlab perceptually uniform colour space conversions.
+pub mod oklab;
