@@ -18,16 +18,16 @@ The dividing line: _file access in the binary, the library works on state_.
 
 ## Architecture
 
-| Crate / Module          | Responsibility                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------- |
-| `libshapeme::shapes`    | `Shape` enum (Triangle/Circle/Polygon), normalisation, mutation, random generation    |
-| `libshapeme::gene`      | `Gene` trait, `ShapeGene` (Shape + z_order), `BlurGene`, `MutationConfig`             |
-| `libshapeme::genome`    | `Genome` trait, `ShapeGenome` (fitness/mutate/recombine); replaces the old `ShapeSet` |
-| `libshapeme::render`    | Framebuffer rasterisation, `draw_genes`, `apply_blur`, `compute_diff`, `scale_image`  |
-| `libshapeme::annealing` | `AnnealingState` only (mutation logic lives in `ShapeGenome::mutate`)                 |
-| `libshapeme::oklab`     | sRGB↔OKlab conversion (`srgb_u8_to_oklab`, `oklab_to_srgb_u8`, bulk variants)        |
-| `libshapeme::svg`       | `build_svg`, `build_svg_from_genome`, `svg_to_data_url` (no file writes)              |
-| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O      |
+| Crate / Module          | Responsibility                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------ |
+| `libshapeme::shapes`    | Utility helpers: `random_oklab_color`, `nudge_oklab`, `rand_between`, `clamp_coord`, shape-kind selection |
+| `libshapeme::gene`      | `Gene` trait; `TriangleGene`, `CircleGene`, `PolygonGene` structs; `ShapeGene` enum; `BlurGene`, `BackgroundGene`, `MutationConfig` |
+| `libshapeme::genome`    | `Genome` trait, `ShapeGenome` (fitness/mutate/recombine); replaces the old `ShapeSet`            |
+| `libshapeme::render`    | Framebuffer rasterisation, `draw_genes`, `apply_blur`, `compute_diff`, `scale_image`             |
+| `libshapeme::annealing` | `AnnealingState` only (mutation logic lives in `ShapeGenome::mutate`)                            |
+| `libshapeme::oklab`     | sRGB↔OKlab conversion (`srgb_u8_to_oklab`, `oklab_to_srgb_u8`, bulk variants)                   |
+| `libshapeme::svg`       | `build_svg(&[ShapeGene], ...)`, `build_svg_from_genome`, `svg_to_data_url` (no file writes)     |
+| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O                |
 
 ## Key design decisions
 
@@ -46,16 +46,51 @@ CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 This is harmless on older cmake versions and should be retained until sdl2-sys
 ships a version of the bundled SDL2 that specifies a modern cmake minimum.
 
+### Typed gene structs
+
+The `Shape` enum is gone. Each shape type is its own struct (`TriangleGene`, `CircleGene`,
+`PolygonGene`), each owning its fields directly and implementing `Gene` independently.
+`ShapeGene` is now an enum wrapping these three types. Mutation code contains no
+shape-type match — each struct's `Gene::mutate` knows exactly which fields it has.
+
+`PolygonGene` owns the polygon-specific operations: `split()` (divide into two
+colour-diverged halves) and `angle_crossover()` (recombine two polygons at a random
+dividing angle). These are inherent methods on `PolygonGene`, not free functions.
+
+`ShapeGene` helpers:
+- `z_order() -> u16` / `set_z_order(u16)` — z-order access without destructuring
+- `cost() -> usize` — budget accounting
+- `random(rng, config) -> Self` — random gene of any enabled type
+- `random_full(rng, config, z_order) -> Self` — random gene at a specific z-order (pub, used by main.rs init)
+
+`shapes.rs` is now a small utility module: `random_oklab_color`, `nudge_oklab`,
+`rand_between`, `clamp_coord`, `ShapeKind`, `select_shape_type`. No types, no `Shape`.
+
+**Checkpoint incompatibility**: the `ShapeGene` enum serialisation is different from the
+old `ShapeGene { shape: Shape, z_order }` struct. Old checkpoints fail to decode and
+display the existing "re-run `shapeme setup`" message.
+
+### OKlab colour sampling
+
+Colours are sampled directly in OKlab space (`random_oklab_color`): L ∈ [0,1],
+a/b ∈ [−0.4, 0.4]. This produces a perceptually uniform colour distribution, unlike
+the old approach of sampling random sRGB bytes and converting.
+
+Nudges are per-channel with different scales: L ±0.01 (tight, narrower range),
+a/b ±0.05 (wider, chromatic channels). Previously all channels used ±0.02.
+`BackgroundGene::mutate` uses the same `random_oklab_color` and `nudge_oklab` helpers.
+
 ### OKlab perceptually uniform colour space
 
-All gene colours (`Shape` fields, `BackgroundGene`) are stored as OKlab `[f32; 3]` rather
-than sRGB `u8` triples. OKlab is a perceptually uniform space (Björn Ottosson, 2020):
-equal distances correspond to equal perceived differences.
+All gene colours (`TriangleGene`, `CircleGene`, `PolygonGene`, `BackgroundGene`) are
+stored as OKlab `[f32; 3]` rather than sRGB `u8` triples. OKlab is a perceptually
+uniform space (Björn Ottosson, 2020): equal distances correspond to equal perceived
+differences.
 
 - **Diff metric**: `compute_diff` returns RMSE in OKlab space (result in [0, ~1.0],
   multiplied by 100 for the percentage-diff value used by annealing). The old sRGB
   Euclidean sum divided by `width*height*442` is removed.
-- **Colour mutations**: nudge ±0.02 per OKlab channel — perceptually uniform steps.
+- **Colour mutations**: nudge per-channel (L ±0.01, a/b ±0.05) — perceptually uniform steps.
 - **Recombination**: arithmetic mean in OKlab is the perceptually correct midpoint.
 - **Framebuffers**: all internal buffers are `Vec<f32>` (3 floats per pixel, OKlab).
 - **Output paths**: SDL textures and SVG output convert OKlab → sRGB u8 at the last step.
@@ -66,8 +101,6 @@ equal distances correspond to equal perceived differences.
   cool/blue pixels and produce a warm (sepia) bias in the stored reference.
 - **Checkpoint compat**: `StoredConfig.image` changed from `Vec<u8>` to `Vec<f32>`.
   Existing checkpoints are incompatible; re-run `shapeme setup`.
-- **Legacy V1 checkpoint migration** (flat `Vec<Shape>`) was removed — those checkpoints
-  could not be decoded with the new shape type regardless.
 
 ### Diff percentage constant: 442, not 422 (historical, now removed)
 
@@ -102,10 +135,13 @@ remain backward-readable without pulling in genome types.
 Uses `bincode` v2 API (`bincode::serde::encode_to_vec` /
 `bincode::serde::decode_from_slice` with `bincode::config::standard()`).
 
-`load_binary` tries the current V2 format (`Checkpoint { config, state, genome: ShapeGenome }`)
-first, then falls back to the legacy V1 format (`LegacyCheckpoint { config, state, shapes: Vec<Shape> }`).
-On a V1 load, each `Shape` is migrated to `ShapeGene { shape, z_order: index }`, preserving the
-original draw order. `save_binary` always writes V2.
+`load_binary` tries to decode `Checkpoint { config, state, genome: ShapeGenome }`.
+Any failure (wrong type, old struct layout, old `Shape`-based layout) produces a clear
+"re-run `shapeme setup`" message. `save_binary` always writes the current format.
+
+The `ShapeGene` type changed from a struct (`{ shape: Shape, z_order: u16 }`) to an enum
+(`Triangle(TriangleGene) | Circle(CircleGene) | Polygon(PolygonGene)`), making all
+previously written checkpoints incompatible at the bincode level.
 
 Checkpoints from before the `StoredConfig` field was added are intentionally incompatible and fail
 with a message directing the user to `shapeme setup`.

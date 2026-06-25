@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use crate::annealing::AnnealingState;
 use crate::gene::{BackgroundGene, BlurGene, Gene, MutationConfig, ShapeGene};
 use crate::render::{apply_blur, compute_diff, draw_genes};
-use crate::shapes::{Shape, polygon_angle_crossover, split_polygon};
 
 /// A complete candidate solution produced by combining genes.
 pub trait Genome: Clone + Send + Sync {
@@ -55,33 +54,14 @@ pub struct ShapeGenome {
 }
 
 impl ShapeGenome {
-    /// Create a genome from legacy `Vec<Shape>`, assigning z-order by original index.
-    ///
-    /// Index-as-z-order preserves the original draw order exactly during checkpoint migration.
+    /// Extract genes sorted by z-order, for display or SVG output.
     #[must_use]
-    pub fn from_shapes(shapes: Vec<Shape>) -> Self {
-        let genes = shapes
-            .into_iter()
-            .enumerate()
-            .map(|(i, shape)| ShapeGene {
-                shape,
-                z_order: i as u16,
-            })
-            .collect();
-        Self {
-            shapes: genes,
-            blur: None,
-            background: BackgroundGene::default(),
-        }
+    pub fn sorted_genes(&self) -> Vec<&ShapeGene> {
+        let mut genes: Vec<&ShapeGene> = self.shapes.iter().collect();
+        genes.sort_unstable_by_key(|g| g.z_order());
+        genes
     }
 
-    /// Extract shapes sorted by z-order, for display or SVG output.
-    #[must_use]
-    pub fn sorted_shapes(&self) -> Vec<&Shape> {
-        let mut genes: Vec<&ShapeGene> = self.shapes.iter().collect();
-        genes.sort_unstable_by_key(|g| g.z_order);
-        genes.iter().map(|g| &g.shape).collect()
-    }
 
     /// The blur radius, if any.
     #[must_use]
@@ -109,11 +89,16 @@ impl ShapeGenome {
     /// chance of replacing parent-A's boundary gene with an angle-blended hybrid of the two.
     /// Use this instead of `Genome::recombine` when image dimensions are available.
     #[must_use]
-    pub fn recombine_configured(&self, other: &Self, rng: &mut impl Rng, config: &MutationConfig) -> Self {
+    pub fn recombine_configured(
+        &self,
+        other: &Self,
+        rng: &mut impl Rng,
+        config: &MutationConfig,
+    ) -> Self {
         let mut a_sorted = self.shapes.clone();
         let mut b_sorted = other.shapes.clone();
-        a_sorted.sort_unstable_by_key(|g| g.z_order);
-        b_sorted.sort_unstable_by_key(|g| g.z_order);
+        a_sorted.sort_unstable_by_key(ShapeGene::z_order);
+        b_sorted.sort_unstable_by_key(ShapeGene::z_order);
 
         let min_len = a_sorted.len().min(b_sorted.len());
         let shapes = if min_len <= 1 {
@@ -130,18 +115,18 @@ impl ShapeGenome {
             // At the crossover boundary, try angle-based polygon crossover.
             // child[k-1] came from parent A; child[k] came from parent B.
             if rng.random_bool(0.5) {
-                if let Some(hybrid) = polygon_angle_crossover(
-                    &a_sorted[k - 1].shape,
-                    &b_sorted[k].shape,
-                    rng,
-                    config.width,
-                    config.height,
-                    config.margin,
-                ) {
-                    let za = a_sorted[k - 1].z_order;
-                    let zb = b_sorted[k].z_order;
-                    let z_order = u32::midpoint(u32::from(za), u32::from(zb)) as u16;
-                    child[k - 1] = ShapeGene { shape: hybrid, z_order };
+                if let (ShapeGene::Polygon(pa), ShapeGene::Polygon(pb)) =
+                    (&a_sorted[k - 1], &b_sorted[k])
+                {
+                    if let Some(mut hybrid) =
+                        pa.angle_crossover(pb, rng, config.width, config.height, config.margin)
+                    {
+                        let za = a_sorted[k - 1].z_order();
+                        let zb = b_sorted[k].z_order();
+                        hybrid.z_order =
+                            u32::midpoint(u32::from(za), u32::from(zb)) as u16;
+                        child[k - 1] = ShapeGene::Polygon(hybrid);
+                    }
                 }
             }
 
@@ -224,31 +209,36 @@ impl Genome for ShapeGenome {
                 .iter()
                 .enumerate()
                 .filter(|(_, g)| {
-                    matches!(&g.shape, Shape::Polygon { vertices, .. } if vertices.len() >= 6)
+                    matches!(g, ShapeGene::Polygon(p) if p.vertices.len() >= 6)
                 })
                 .map(|(i, _)| i)
                 .collect();
             if !poly_indices.is_empty() {
                 let idx = poly_indices[rng.random_range(0..poly_indices.len())];
-                if let Some((s_a, s_b)) =
-                    split_polygon(&shapes[idx].shape, rng, config.width, config.height, config.margin)
-                {
-                    let z = shapes[idx].z_order;
-                    let gene_a = ShapeGene { shape: s_a, z_order: z };
-                    let gene_b = ShapeGene { shape: s_b, z_order: z.saturating_add(1) };
-                    let rest_cost: usize = shapes
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != idx)
-                        .map(|(_, g)| g.cost())
-                        .sum();
-                    if rest_cost + gene_a.cost() + gene_b.cost() <= state.max_cost
-                        && rest_cost + gene_a.cost() + gene_b.cost() <= state.max_cost_incremental
+                if let ShapeGene::Polygon(p) = &shapes[idx] {
+                    if let Some((g_a, g_b)) =
+                        p.split(rng, config.width, config.height, config.margin)
                     {
-                        shapes[idx] = gene_a;
-                        shapes.push(gene_b);
-                        tracing::trace!(mutation = "split-polygon", "split polygon into two colour-diverged halves");
-                        return Self { shapes, blur, background };
+                        let rest_cost: usize = shapes
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != idx)
+                            .map(|(_, g)| g.cost())
+                            .sum();
+                        let gene_a = ShapeGene::Polygon(g_a);
+                        let gene_b = ShapeGene::Polygon(g_b);
+                        let cost_ab = gene_a.cost() + gene_b.cost();
+                        if rest_cost + cost_ab <= state.max_cost
+                            && rest_cost + cost_ab <= state.max_cost_incremental
+                        {
+                            shapes[idx] = gene_a;
+                            shapes.push(gene_b);
+                            tracing::trace!(
+                                mutation = "split-polygon",
+                                "split polygon into two colour-diverged halves"
+                            );
+                            return Self { shapes, blur, background };
+                        }
                     }
                 }
             }
@@ -260,10 +250,10 @@ impl Genome for ShapeGenome {
             let a = rng.random_range(0..shapes.len());
             let b = rng.random_range(0..shapes.len());
             if a != b {
-                let za = shapes[a].z_order;
-                let zb = shapes[b].z_order;
-                shapes[a].z_order = zb;
-                shapes[b].z_order = za;
+                let za = shapes[a].z_order();
+                let zb = shapes[b].z_order();
+                shapes[a].set_z_order(zb);
+                shapes[b].set_z_order(za);
             }
         }
 
@@ -297,8 +287,8 @@ impl Genome for ShapeGenome {
         // Single-point crossover in z-order space.
         let mut a_sorted = self.shapes.clone();
         let mut b_sorted = other.shapes.clone();
-        a_sorted.sort_unstable_by_key(|g| g.z_order);
-        b_sorted.sort_unstable_by_key(|g| g.z_order);
+        a_sorted.sort_unstable_by_key(ShapeGene::z_order);
+        b_sorted.sort_unstable_by_key(ShapeGene::z_order);
 
         let min_len = a_sorted.len().min(b_sorted.len());
         let shapes = if min_len <= 1 {
@@ -341,7 +331,7 @@ mod tests {
     use rand::rngs::SmallRng;
 
     use super::*;
-    use crate::shapes::Shape;
+    use crate::gene::{CircleGene, PolygonGene, TRIANGLE_COST, TriangleGene};
 
     fn sample_config() -> MutationConfig {
         MutationConfig {
@@ -359,32 +349,18 @@ mod tests {
     fn sample_genome() -> ShapeGenome {
         ShapeGenome {
             shapes: vec![
-                ShapeGene {
-                    shape: Shape::Triangle {
-                        x1: 0,
-                        y1: 0,
-                        x2: 50,
-                        y2: 0,
-                        x3: 25,
-                        y3: 50,
-                        oklab: [0.6279, -0.2516, 0.0000], // ~red in OKlab
-                        alpha: 50,
-                    },
+                ShapeGene::Triangle(TriangleGene {
+                    x1: 0, y1: 0, x2: 50, y2: 0, x3: 25, y3: 50,
+                    oklab: [0.6279, -0.2516, 0.0000],
+                    alpha: 50,
                     z_order: 100,
-                },
-                ShapeGene {
-                    shape: Shape::Triangle {
-                        x1: 10,
-                        y1: 10,
-                        x2: 60,
-                        y2: 10,
-                        x3: 35,
-                        y3: 60,
-                        oklab: [0.8664, -0.2334, 0.1795], // ~green in OKlab
-                        alpha: 50,
-                    },
+                }),
+                ShapeGene::Triangle(TriangleGene {
+                    x1: 10, y1: 10, x2: 60, y2: 10, x3: 35, y3: 60,
+                    oklab: [0.8664, -0.2334, 0.1795],
+                    alpha: 50,
                     z_order: 200,
-                },
+                }),
             ],
             blur: None,
             background: BackgroundGene::default(),
@@ -392,45 +368,15 @@ mod tests {
     }
 
     #[test]
-    fn from_shapes_preserves_order_as_z_order() {
-        let shapes = vec![
-            Shape::Circle {
-                cx: 10,
-                cy: 10,
-                radius: 5,
-                oklab: [0.6279, -0.2516, 0.0000],
-                alpha: 50,
-            },
-            Shape::Circle {
-                cx: 20,
-                cy: 20,
-                radius: 5,
-                oklab: [0.8664, -0.2334, 0.1795],
-                alpha: 50,
-            },
-        ];
-        let genome = ShapeGenome::from_shapes(shapes);
-        assert_eq!(genome.shapes[0].z_order, 0);
-        assert_eq!(genome.shapes[1].z_order, 1);
-    }
-
-    #[test]
     fn mutate_never_empties_genome() {
         let mut rng = SmallRng::seed_from_u64(42);
         let mut genome = ShapeGenome {
-            shapes: vec![ShapeGene {
-                shape: Shape::Triangle {
-                    x1: 0,
-                    y1: 0,
-                    x2: 50,
-                    y2: 0,
-                    x3: 25,
-                    y3: 50,
-                    oklab: [0.5987, 0.0000, 0.0000], // mid-grey in OKlab
-                    alpha: 50,
-                },
+            shapes: vec![ShapeGene::Triangle(TriangleGene {
+                x1: 0, y1: 0, x2: 50, y2: 0, x3: 25, y3: 50,
+                oklab: [0.5987, 0.0, 0.0],
+                alpha: 50,
                 z_order: 0,
-            }],
+            })],
             blur: None,
             background: BackgroundGene::default(),
         };
@@ -465,23 +411,21 @@ mod tests {
         // Use a large incremental budget so the split can succeed.
         let state = AnnealingState::new_from_shape_count(64, 10);
         let genome = ShapeGenome {
-            shapes: vec![ShapeGene {
-                shape: Shape::Polygon {
-                    vertices: vec![
-                        (0, 0),
-                        (50, 0),
-                        (100, 0),
-                        (100, 50),
-                        (100, 100),
-                        (50, 100),
-                        (0, 100),
-                        (0, 50),
-                    ],
-                    oklab: [0.5, 0.0, 0.0],
-                    alpha: 50,
-                },
+            shapes: vec![ShapeGene::Polygon(PolygonGene {
+                vertices: vec![
+                    (0, 0),
+                    (50, 0),
+                    (100, 0),
+                    (100, 50),
+                    (100, 100),
+                    (50, 100),
+                    (0, 100),
+                    (0, 50),
+                ],
+                oklab: [0.5, 0.0, 0.0],
+                alpha: 50,
                 z_order: 0,
-            }],
+            })],
             blur: None,
             background: BackgroundGene::default(),
         };
@@ -505,5 +449,37 @@ mod tests {
         let mut scratch = vec![0.0f32; (w * h * 3) as usize];
         let f = genome.fitness(&target, w, h, &mut scratch);
         assert!(f >= 0.0, "fitness must be non-negative: {f}");
+    }
+
+    #[test]
+    fn sorted_genes_respects_z_order() {
+        let genome = ShapeGenome {
+            shapes: vec![
+                ShapeGene::Circle(CircleGene {
+                    cx: 20, cy: 20, radius: 5,
+                    oklab: [0.5, 0.0, 0.0],
+                    alpha: 50,
+                    z_order: 200,
+                }),
+                ShapeGene::Circle(CircleGene {
+                    cx: 10, cy: 10, radius: 5,
+                    oklab: [0.5, 0.0, 0.0],
+                    alpha: 50,
+                    z_order: 100,
+                }),
+            ],
+            blur: None,
+            background: BackgroundGene::default(),
+        };
+        let sorted = genome.sorted_genes();
+        assert_eq!(sorted[0].z_order(), 100);
+        assert_eq!(sorted[1].z_order(), 200);
+    }
+
+    #[test]
+    fn gene_costs_sum_correctly() {
+        let genome = sample_genome();
+        let expected = TRIANGLE_COST * 2;
+        assert_eq!(genome.total_cost(), expected);
     }
 }

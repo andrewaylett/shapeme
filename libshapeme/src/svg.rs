@@ -1,10 +1,10 @@
 use std::fmt::Write as _;
 
+use crate::gene::{CircleGene, PolygonGene, ShapeGene, TriangleGene};
 use crate::genome::ShapeGenome;
 use crate::oklab;
-use crate::shapes::Shape;
 
-/// Build an SVG string representing the given shapes.
+/// Build an SVG string representing the given shape genes.
 ///
 /// `blur_radius` (Gaussian sigma) wraps all content in a `<feGaussianBlur>` filter.
 /// `compact` omits the XML declaration and DOCTYPE, uses single-quoted attributes,
@@ -12,7 +12,7 @@ use crate::shapes::Shape;
 /// Shape colours are converted from `OKlab` to sRGB at output time.
 #[must_use]
 pub fn build_svg(
-    shapes: &[Shape],
+    genes: &[ShapeGene],
     width: u32,
     height: u32,
     blur_radius: Option<f32>,
@@ -47,8 +47,8 @@ pub fn build_svg(
             "<rect width='{width}' height='{height}' fill='#{bg_r:02x}{bg_g:02x}{bg_b:02x}'/>"
         )
         .expect("String write is infallible");
-        for shape in shapes {
-            push_shape(&mut s, shape, true);
+        for gene in genes {
+            push_gene(&mut s, gene, true);
         }
 
         if blur_radius.is_some() {
@@ -84,8 +84,8 @@ pub fn build_svg(
             "<rect width=\"{width}\" height=\"{height}\" fill=\"#{bg_r:02x}{bg_g:02x}{bg_b:02x}\"/>"
         )
         .expect("String write is infallible");
-        for shape in shapes {
-            push_shape(&mut s, shape, false);
+        for gene in genes {
+            push_gene(&mut s, gene, false);
         }
 
         if blur_radius.is_some() {
@@ -97,18 +97,9 @@ pub fn build_svg(
     s
 }
 
-fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
-    match shape {
-        Shape::Triangle {
-            x1,
-            y1,
-            x2,
-            y2,
-            x3,
-            y3,
-            oklab,
-            alpha,
-        } => {
+fn push_gene(s: &mut String, gene: &ShapeGene, compact: bool) {
+    match gene {
+        ShapeGene::Triangle(TriangleGene { x1, y1, x2, y2, x3, y3, oklab, alpha, .. }) => {
             let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             if compact {
@@ -129,13 +120,7 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
                 .expect("String write is infallible");
             }
         }
-        Shape::Circle {
-            cx,
-            cy,
-            radius,
-            oklab,
-            alpha,
-        } => {
+        ShapeGene::Circle(CircleGene { cx, cy, radius, oklab, alpha, .. }) => {
             let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             if compact {
@@ -156,11 +141,7 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
                 .expect("String write is infallible");
             }
         }
-        Shape::Polygon {
-            vertices,
-            oklab,
-            alpha,
-        } => {
+        ShapeGene::Polygon(PolygonGene { vertices, oklab, alpha, .. }) => {
             let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             let pts: String = vertices
@@ -191,11 +172,17 @@ fn push_shape(s: &mut String, shape: &Shape, compact: bool) {
 
 /// Build an SVG string from a `ShapeGenome`, respecting z-order.
 ///
-/// Thin wrapper around `build_svg` that extracts shapes in z-order and the blur radius.
+/// Thin wrapper around `build_svg` that extracts genes in z-order and the blur radius.
 #[must_use]
-pub fn build_svg_from_genome(genome: &ShapeGenome, width: u32, height: u32, compact: bool) -> String {
-    let shapes: Vec<Shape> = genome.sorted_shapes().into_iter().cloned().collect();
-    build_svg(&shapes, width, height, genome.blur_radius(), genome.background_oklab(), compact)
+pub fn build_svg_from_genome(
+    genome: &ShapeGenome,
+    width: u32,
+    height: u32,
+    compact: bool,
+) -> String {
+    let genes: Vec<&ShapeGene> = genome.sorted_genes();
+    let owned: Vec<ShapeGene> = genes.into_iter().cloned().collect();
+    build_svg(&owned, width, height, genome.blur_radius(), genome.background_oklab(), compact)
 }
 
 /// Percent-encode a compact SVG string for use as a `data:image/svg+xml,` URL.
@@ -216,28 +203,26 @@ pub fn svg_to_data_url(svg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shapes::Shape;
+    use crate::gene::TriangleGene;
 
-    fn sample_triangle() -> Vec<Shape> {
-        vec![Shape::Triangle {
+    fn sample_triangle() -> Vec<ShapeGene> {
+        vec![ShapeGene::Triangle(TriangleGene {
             x1: 0,
             y1: 0,
             x2: 10,
             y2: 0,
             x3: 5,
             y3: 10,
-            oklab: [0.6279, -0.2516, 0.0000], // ~red in OKlab
+            oklab: [0.6279, -0.2516, 0.0000],
             alpha: 50,
-        }]
+            z_order: 0,
+        })]
     }
 
     #[test]
     fn build_svg_compact_has_viewbox_and_preserveaspectratio() {
         let svg = build_svg(&sample_triangle(), 100, 200, None, [0.0, 0.0, 0.0], true);
-        assert!(
-            svg.contains("viewBox='0 0 100 200'"),
-            "missing viewBox: {svg}"
-        );
+        assert!(svg.contains("viewBox='0 0 100 200'"), "missing viewBox: {svg}");
         assert!(
             svg.contains("preserveAspectRatio='xMidYMid slice'"),
             "missing preserveAspectRatio: {svg}"
@@ -254,10 +239,7 @@ mod tests {
     fn build_svg_compact_includes_blur_filter() {
         let svg = build_svg(&sample_triangle(), 100, 100, Some(8.0), [0.0, 0.0, 0.0], true);
         assert!(svg.contains("feGaussianBlur"), "missing blur filter: {svg}");
-        assert!(
-            svg.contains("stdDeviation='8'"),
-            "wrong stdDeviation: {svg}"
-        );
+        assert!(svg.contains("stdDeviation='8'"), "wrong stdDeviation: {svg}");
     }
 
     #[test]
@@ -276,10 +258,7 @@ mod tests {
     #[test]
     fn svg_to_data_url_encodes_special_chars() {
         let url = svg_to_data_url("<svg><rect fill='#fff'/></svg>");
-        assert!(
-            url.starts_with("data:image/svg+xml,"),
-            "wrong prefix: {url}"
-        );
+        assert!(url.starts_with("data:image/svg+xml,"), "wrong prefix: {url}");
         assert!(url.contains("%3C"), "< not encoded: {url}");
         assert!(url.contains("%3E"), "> not encoded: {url}");
         assert!(url.contains("%23"), "# not encoded: {url}");
@@ -290,7 +269,6 @@ mod tests {
 
     #[test]
     fn svg_to_data_url_no_double_encoding() {
-        // < must become %3C, not %253C (which happens if % is encoded after <)
         let url = svg_to_data_url("<tag/>");
         assert!(url.contains("%3C"), "< not encoded: {url}");
         assert!(!url.contains("%253C"), "double-encoded <: {url}");
