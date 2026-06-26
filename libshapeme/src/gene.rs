@@ -398,8 +398,8 @@ impl PolygonGene {
 impl Gene for PolygonGene {
     fn mutate(&self, rng: &mut impl Rng, config: &MutationConfig) -> Self {
         let mut g = self.clone();
-        match rng.random_range(0..8u32) {
-            0 => {
+        match rng.random_range(0..32u32) {
+            0..4 => {
                 let n = g.vertices.len();
                 g.vertices = (0..n)
                     .map(|_| {
@@ -411,31 +411,32 @@ impl Gene for PolygonGene {
                     .collect();
                 g.normalize(config.width, config.height, config.margin);
             }
-            1 => {
+            4..8 => {
                 for (vx, vy) in &mut g.vertices {
                     *vx = vx.saturating_add(rand_between(rng, -20, 20) as i16);
                     *vy = vy.saturating_add(rand_between(rng, -20, 20) as i16);
                 }
                 g.normalize(config.width, config.height, config.margin);
             }
-            2 => {
+            8..12 => {
                 for (vx, vy) in &mut g.vertices {
                     *vx = vx.saturating_add(rand_between(rng, -5, 5) as i16);
                     *vy = vy.saturating_add(rand_between(rng, -5, 5) as i16);
                 }
                 g.normalize(config.width, config.height, config.margin);
             }
-            3 => {
+            12..16 => {
                 let (new_oklab, _) = random_oklab_color(rng);
                 g.oklab = new_oklab;
             }
-            4 => {
+            16..20 => {
                 g.oklab = nudge_oklab(rng, g.oklab);
             }
-            5 => {
+            20..24 => {
                 g.alpha = rand_between(rng, MINALPHA as i32, MAXALPHA as i32) as u8;
             }
-            6 => {
+            // Less likely
+            24 => {
                 // Split a random edge by inserting its midpoint (nudged ±20 px).
                 // Falls back to a small nudge when the vertex cap has been reached.
                 if g.vertices.len() < config.max_polygon_vertices {

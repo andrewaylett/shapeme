@@ -687,8 +687,16 @@ fn process(args: &ProcessArgs) -> Result<()> {
             return Ok(());
         }
 
-        // Sort batches by diff ascending; best is first
+        // Include the pre-round absbest so it competes on equal footing; if every
+        // batch regressed, this ensures the round ends with no change rather than
+        // silently accepting a worse genome.
         let mut results_sorted = results;
+        results_sorted.push(BatchResult {
+            best_genome: absbest_genome.clone(),
+            state: state.clone(),
+        });
+
+        // Sort batches by diff ascending; best is first
         results_sorted.sort_unstable_by(|a, b| {
             a.state
                 .absbestdiff
