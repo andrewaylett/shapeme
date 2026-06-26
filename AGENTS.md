@@ -218,9 +218,12 @@ approximate typical values for a 256×256 image.)
 CLI `--max-shapes N` is stored as `max_cost = N × TRIANGLE_COST` in `AnnealingState` so the
 user-visible "shapes" concept is preserved while the budget correctly penalises complex polygons.
 
-`max_polygon_vertices` in `MutationConfig` (set to `max_shapes.max(6)`) caps the `split_edge`
-mutation, preventing unbounded polygon growth. When the cap is reached, `split_edge` falls back
-to a small-nudge mutation instead.
+`max_polygon_vertices` in `MutationConfig` caps the `split_edge` mutation, preventing unbounded
+polygon growth. When the cap is reached, `split_edge` falls back to a small-nudge mutation instead.
+The cap is computed dynamically inside `ShapeGenome::mutate` as `(4 × genome.shapes.len()).max(6)`,
+tying per-shape complexity to genome density. The static `max_shapes * 4` value stored in
+`MutationConfig` is a fallback used only when genes are mutated outside that path (e.g. initial
+genome construction).
 
 Polygon vertices are sorted by angle from the centroid on every `normalize()` call, eliminating
 self-intersecting edges. Clamping runs first so the centroid is computed from the final

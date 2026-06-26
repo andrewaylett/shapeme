@@ -272,11 +272,17 @@ impl Genome for ShapeGenome {
             background = background.mutate(rng, config);
         }
 
+        // Dynamic vertex cap: tie per-polygon complexity to genome size
+        let dynamic_config = MutationConfig {
+            max_polygon_vertices: (4 * shapes.len()).max(6),
+            ..*config
+        };
+
         // Attempt individual shape gene mutations
         for _ in 0..MUTATION_ATTEMPTS {
             let idx = rng.random_range(0..shapes.len());
             if rng.random_range(0..1000u32) < config.mutation_rate {
-                shapes[idx] = shapes[idx].mutate(rng, config);
+                shapes[idx] = shapes[idx].mutate(rng, &dynamic_config);
             }
         }
 

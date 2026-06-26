@@ -400,7 +400,7 @@ fn run_batch(
         use_triangles: config.use_triangles,
         use_circles: config.use_circles,
         use_polygons: config.use_polygons,
-        max_polygon_vertices: config.max_shapes.max(6),
+        max_polygon_vertices: config.max_shapes * 4,
     };
 
     let mut best_genome = start_genome.clone();
@@ -502,7 +502,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
             use_triangles,
             use_circles,
             use_polygons,
-            max_polygon_vertices: config.max_shapes.max(6),
+            max_polygon_vertices: config.max_shapes * 4,
         };
         let genes: Vec<ShapeGene> = (0..config.initial_shapes)
             .map(|i| ShapeGene::random_full(&mut rng, &mutation_config, i as u16))
@@ -710,7 +710,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
             use_triangles: config.use_triangles,
             use_circles: config.use_circles,
             use_polygons: config.use_polygons,
-            max_polygon_vertices: config.max_shapes.max(6),
+            max_polygon_vertices: config.max_shapes * 4,
         };
 
         if top_n >= 2 {
