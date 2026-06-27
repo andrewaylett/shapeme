@@ -209,7 +209,7 @@ impl Genome for ShapeGenome {
                 .iter()
                 .enumerate()
                 .filter(|(_, g)| {
-                    matches!(g, ShapeGene::Polygon(p) if p.vertices.len() >= 6)
+                    matches!(g, ShapeGene::Polygon(p) if p.vertices.len() >= 4)
                 })
                 .map(|(i, _)| i)
                 .collect();

@@ -285,9 +285,10 @@ impl PolygonGene {
 
     /// Split into two colour-diverged polygons by dividing the angle-sorted vertex list.
     ///
-    /// Divides at a random start index: half A gets the first `n/2` vertices (wrapping),
-    /// half B gets the rest. Colours are nudged in opposite directions on the a/b channels
-    /// while L is kept identical. Returns `None` when fewer than 6 vertices.
+    /// Picks a random start index `s` and a chord at `s+half`. Both output polygons share
+    /// the two chord endpoints (`v_s` and `v_{s+half}`), so a 4-vertex polygon splits into
+    /// two triangles. Colours are nudged in opposite directions on the a/b channels while L
+    /// is kept identical. Returns `None` when fewer than 4 vertices.
     pub fn split(
         &self,
         rng: &mut impl Rng,
@@ -296,14 +297,16 @@ impl PolygonGene {
         margin: i16,
     ) -> Option<(Self, Self)> {
         let n = self.vertices.len();
-        if n < 6 {
+        if n < 4 {
             return None;
         }
         let s = rng.random_range(0..n);
         let half = n / 2;
 
-        let verts_a: Vec<(i16, i16)> = (0..half).map(|i| self.vertices[(s + i) % n]).collect();
-        let verts_b: Vec<(i16, i16)> = (half..n).map(|i| self.vertices[(s + i) % n]).collect();
+        // A: v_s ..= v_{s+half}  (half+1 vertices, inclusive on both ends)
+        // B: v_{s+half} ..= v_{s+n}  (wraps around, inclusive — shares both chord endpoints)
+        let verts_a: Vec<(i16, i16)> = (0..=half).map(|i| self.vertices[(s + i) % n]).collect();
+        let verts_b: Vec<(i16, i16)> = (half..=n).map(|i| self.vertices[(s + i) % n]).collect();
 
         let [l, a_ch, b_ch] = self.oklab;
         let mut gene_a = Self {
@@ -974,7 +977,13 @@ mod tests {
         let (a, b) = result.unwrap();
         assert!(a.vertices.len() >= 3, "half A must have >= 3 vertices, got {}", a.vertices.len());
         assert!(b.vertices.len() >= 3, "half B must have >= 3 vertices, got {}", b.vertices.len());
-        assert_eq!(a.vertices.len() + b.vertices.len(), 6, "total vertex count must equal original");
+        // Shared-endpoint split: each output polygon includes both chord endpoints,
+        // so combined count is n + 2.
+        assert_eq!(
+            a.vertices.len() + b.vertices.len(),
+            8,
+            "shared-endpoint split of 6-vertex polygon yields 4+4 = 8 total vertices"
+        );
         assert_eq!(a.z_order, 10, "half A inherits parent z_order");
         assert_eq!(b.z_order, 11, "half B gets z_order + 1");
     }
@@ -990,7 +999,7 @@ mod tests {
         };
         assert!(
             g.split(&mut rng, 100, 100, 0).is_none(),
-            "split should return None for < 6 vertices"
+            "split should return None for < 4 vertices"
         );
     }
 

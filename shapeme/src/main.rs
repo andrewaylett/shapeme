@@ -20,7 +20,10 @@ use sdl2::video::{Window, WindowContext};
 use tracing::Level;
 
 use libshapeme::annealing::AnnealingState;
-use libshapeme::gene::{BackgroundGene, BlurGene, MutationConfig, ShapeGene, TRIANGLE_COST};
+use libshapeme::gene::{
+    BackgroundGene, BlurGene, MutationConfig, ShapeGene, CIRCLE_COST, POLYGON_BASE_COST,
+    POLYGON_VERTEX_COST, TRIANGLE_COST,
+};
 use libshapeme::genome::{Genome, ShapeGenome};
 use libshapeme::oklab;
 use libshapeme::render::{apply_blur, draw_genes, scale_image};
@@ -403,6 +406,18 @@ fn run_batch(
         max_polygon_vertices: config.max_shapes * 4,
     };
 
+    let min_addable_cost = [
+        mutation_config.use_triangles.then_some(TRIANGLE_COST),
+        mutation_config.use_circles.then_some(CIRCLE_COST),
+        mutation_config
+            .use_polygons
+            .then_some(POLYGON_BASE_COST + 3 * POLYGON_VERTEX_COST),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(TRIANGLE_COST);
+
     let mut best_genome = start_genome.clone();
     let mut absbest_genome = start_genome.clone();
     let mut bestdiff = state.absbestdiff;
@@ -419,9 +434,9 @@ fn run_batch(
 
         if state.generation % 1000 == 0
             && state.max_cost_incremental < state.max_cost
-            && best_genome.total_cost() + TRIANGLE_COST > state.max_cost_incremental
+            && best_genome.total_cost() + min_addable_cost > state.max_cost_incremental
         {
-            state.max_cost_incremental += TRIANGLE_COST;
+            state.max_cost_incremental += min_addable_cost;
         }
 
         let candidate = best_genome.mutate(&mut rng, &state, &mutation_config);
