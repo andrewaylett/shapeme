@@ -222,14 +222,27 @@ impl Genome for GridGenome {
         self.cols as usize * self.rows as usize
     }
 
-    fn fitness(&self, target: &[f32], width: u32, height: u32, scratch: &mut Vec<f32>) -> f32 {
+    fn fitness(
+        &self,
+        target: &[f32],
+        blurred_target: Option<&[f32]>,
+        width: u32,
+        height: u32,
+        scratch: &mut Vec<f32>,
+    ) -> f32 {
         self.render_to_fb(scratch, width, height);
         let blurred_opt = self
             .blur_radius()
             .map(|r| apply_blur(scratch, width, height, r));
         let display: &[f32] = blurred_opt.as_deref().unwrap_or(scratch);
-        let diff = compute_diff(target, display);
-        diff as f32 * 100.0
+        blurred_target.map_or_else(
+            || compute_diff(target, display) as f32 * 100.0,
+            |bt| {
+                let diff_sharp = compute_diff(target, display) as f32;
+                let diff_blurred = compute_diff(bt, display) as f32;
+                f32::midpoint(diff_sharp, diff_blurred) * 100.0
+            },
+        )
     }
 
     fn mutate(&self, rng: &mut impl Rng, _state: &AnnealingState, config: &MutationConfig) -> Self {
@@ -364,7 +377,7 @@ mod tests {
         let g = GridGenome::new(3, 3, 16, 16, None);
         let target = vec![0.5f32; 16 * 16 * 3];
         let mut scratch = vec![0.0f32; 16 * 16 * 3];
-        let f = g.fitness(&target, 16, 16, &mut scratch);
+        let f = g.fitness(&target, None, 16, 16, &mut scratch);
         assert!(f >= 0.0, "fitness must be non-negative: {f}");
     }
 

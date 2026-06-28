@@ -24,7 +24,20 @@ pub trait Genome: Clone + Send + Sync {
     ///
     /// `target` and `scratch` are `OKlab` f32 buffers (3 floats per pixel).
     /// `scratch` is reused by the caller between calls — avoids a per-call allocation.
-    fn fitness(&self, target: &[f32], width: u32, height: u32, scratch: &mut Vec<f32>) -> f32;
+    ///
+    /// When `blurred_target` is `Some`, the returned fitness is the average of
+    /// `compute_diff(blurred_candidate, sharp_target)` and
+    /// `compute_diff(blurred_candidate, blurred_target)`, keeping a high-frequency
+    /// penalty while also rewarding low-frequency fidelity.  Pass `None` for a
+    /// pure sharp-reference diff (used when the genome has no blur).
+    fn fitness(
+        &self,
+        target: &[f32],
+        blurred_target: Option<&[f32]>,
+        width: u32,
+        height: u32,
+        scratch: &mut Vec<f32>,
+    ) -> f32;
 
     /// Return a mutated copy of this genome.
     #[must_use]
@@ -229,15 +242,28 @@ impl Genome for ShapeGenome {
         }
     }
 
-    fn fitness(&self, target: &[f32], width: u32, height: u32, scratch: &mut Vec<f32>) -> f32 {
+    fn fitness(
+        &self,
+        target: &[f32],
+        blurred_target: Option<&[f32]>,
+        width: u32,
+        height: u32,
+        scratch: &mut Vec<f32>,
+    ) -> f32 {
         self.render_to_fb(scratch, width, height);
         let blurred_opt = self
             .blur_radius()
             .map(|r| apply_blur(scratch, width, height, r));
         let display: &[f32] = blurred_opt.as_deref().unwrap_or(scratch);
-        let diff = compute_diff(target, display);
         // RMSE is in [0, ~1.0]; multiply by 100 to express as a percentage.
-        diff as f32 * 100.0
+        blurred_target.map_or_else(
+            || compute_diff(target, display) as f32 * 100.0,
+            |bt| {
+                let diff_sharp = compute_diff(target, display) as f32;
+                let diff_blurred = compute_diff(bt, display) as f32;
+                f32::midpoint(diff_sharp, diff_blurred) * 100.0
+            },
+        )
     }
 
     #[allow(
@@ -570,7 +596,7 @@ mod tests {
         let h = 10u32;
         let target = vec![0.0f32; (w * h * 3) as usize];
         let mut scratch = vec![0.0f32; (w * h * 3) as usize];
-        let f = genome.fitness(&target, w, h, &mut scratch);
+        let f = genome.fitness(&target, None, w, h, &mut scratch);
         assert!(f >= 0.0, "fitness must be non-negative: {f}");
     }
 

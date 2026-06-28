@@ -274,31 +274,34 @@ provides concrete impls; `GridGenome` overrides all except `trim_to_budget`. The
 `run_process_loop` and `run_batch` functions use these trait methods so both genome types share
 the same annealing loop.
 
-### `--blur-target-factor` (setup flag)
+### Combined blur/sharp fitness function
 
-`shapeme setup --blur-target-factor <F>` stores `StoredConfig.blur_target_factor = Some(F)`.
-During `process`, the fitness function blurs the _target_ image at `F × candidate_blur_radius`
-before calling `compute_diff`. Omit the flag to use the sharp reference.
+When the genome has an active blur radius `r`, the fitness function computes a 50/50 blend:
 
-Common values: `1.0` = blur target at the same radius as the candidate; `0.5` = half the
-candidate's radius (softer penalty on mid-frequency detail without fully collapsing the signal).
+```
+blurred_candidate = apply_blur(render(genome), r)
+blurred_target    = apply_blur(sharp_target, r)
 
-**Why**: when the genome carries a large blur, the diff penalises fine detail that the blur will
-erase anyway. Pre-blurring the target removes that penalty, keeping the fitness signal in the same
-perceptual space as the rendered output.
+diff_sharp   = compute_diff(blurred_candidate, sharp_target)
+diff_blurred = compute_diff(blurred_candidate, blurred_target)
 
-**Blur inflation dynamic**: reducing diff by blurring both sides gives the annealer a
-blur-independent incentive to increase blur radius. The effect is strongest at `factor = 1.0`
-and proportionally weaker at smaller factors. This changes what the reported diff value means —
-expected and accepted behaviour when this flag is used.
+fitness = (diff_sharp + diff_blurred) / 2.0 × 100
+```
 
-**Implementation** (`shapeme/src/main.rs`): `effective_target(blur_radius, config, cache) -> &[f32]`
-returns `&config.image` when `blur_target_factor` is `None` or `blur_radius` is `None`; otherwise
-it computes `target_r = blur_radius * factor`, recomputes the blurred target if the radius changed
-by more than 1e-4, and returns the cached slice. The cache is a local `Option<(f32, Vec<f32>)>` at
-each diff site — one per `run_batch` call and one for the recombination loop in `run_process_loop`.
-Since blur only changes on ~5% of mutations, cache misses are rare.
+When the genome has no blur, the formula reduces to `compute_diff(render(genome), sharp_target) × 100` unchanged.
 
-**Display sites are unchanged**: the SDL "show original" toggle (spacebar) and the initial window
-paint always display the sharp reference image regardless of `--blur-target-factor`. The flag is
-fitness-only.
+**Why**: `diff_blurred` rewards low-frequency fidelity (blur removes detail both sides can't see),
+while `diff_sharp` keeps a high-frequency penalty so the annealer cannot cheaply inflate blur to
+collapse the signal. The previous `--blur-target-factor` flag had the same motivation but exposed
+a "blur inflation" dynamic: blurring both sides equally always reduces the reported diff regardless
+of genome quality, incentivising ever-larger blur radii. The 50/50 blend avoids that by keeping
+`diff_sharp` in the sum, which increases when blur erases useful structure.
+
+**Implementation** (`libshapeme/src/genome.rs`, `libshapeme/src/grid.rs`): `Genome::fitness` takes
+an optional `blurred_target: Option<&[f32]>` parameter alongside the sharp `target`. When
+`Some`, both diffs are computed and averaged; when `None`, only the sharp diff is computed.
+
+**Callers** (`shapeme/src/main.rs`): `run_batch` and the recombination loop in `run_process_loop`
+each maintain a `blurred_target_cache: Option<(f32, Vec<f32>)>` holding the target blurred at the
+current candidate's blur radius. The cache is only recomputed when blur radius changes (≈5% of
+mutations). The SDL display sites are unaffected — spacebar always toggles the sharp reference.

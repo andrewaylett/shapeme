@@ -91,10 +91,6 @@ struct SetupArgs {
     /// Initial Gaussian blur sigma; will be evolved during processing
     #[arg(long)]
     blur_radius: Option<f32>,
-    /// Blur the target image at this fraction of the candidate's blur radius before diff
-    /// (e.g. 0.5 = half-blur, 1.0 = full-blur); omit to use the sharp reference
-    #[arg(long)]
-    blur_target_factor: Option<f32>,
     /// Constrain the data URL to at most N bytes (enforced each generation)
     #[arg(long)]
     max_bytes: Option<usize>,
@@ -164,8 +160,6 @@ struct StoredConfig {
     initial_shapes: usize,
     /// User-supplied starting blur sigma; used to reset blur on `process --restart`.
     initial_blur_radius: Option<f32>,
-    /// When set, the target is blurred at this fraction of the candidate's blur radius before diff.
-    blur_target_factor: Option<f32>,
 }
 
 /// Genome variant stored in the checkpoint.
@@ -514,7 +508,6 @@ fn setup(args: &SetupArgs) -> Result<()> {
         max_shapes,
         initial_shapes: config_initial_shapes,
         initial_blur_radius: args.blur_radius,
-        blur_target_factor: args.blur_target_factor,
     };
 
     save_binary(&args.checkpoint, &config, &state, &initial_genome)?;
@@ -541,25 +534,6 @@ struct BatchResult<G> {
     best_genome: G,
     /// Full annealing state at batch end; `absbestdiff` is the lowest diff seen.
     state: AnnealingState,
-}
-
-/// Return the target image to diff against, blurring it to match the candidate if `blur_target`
-/// is set. The cached `(radius, blurred_image)` pair is reused when the radius hasn't changed,
-/// since blur only shifts on ~5% of mutations.
-fn effective_target<'a>(
-    blur_radius: Option<f32>,
-    config: &'a StoredConfig,
-    cache: &'a mut Option<(f32, Vec<f32>)>,
-) -> &'a [f32] {
-    if let (Some(factor), Some(r)) = (config.blur_target_factor, blur_radius) {
-        let target_r = r * factor;
-        let stale = cache.as_ref().is_none_or(|(cr, _)| (cr - target_r).abs() > 1e-4);
-        if stale {
-            *cache = Some((target_r, apply_blur(&config.image, config.width, config.height, target_r)));
-        }
-        return &cache.as_ref().expect("cache was just populated").1;
-    }
-    &config.image
 }
 
 #[allow(
@@ -590,7 +564,9 @@ fn run_batch<G: Genome>(
     let mut best_genome = start_genome.clone();
     let mut absbest_genome = start_genome.clone();
     let mut bestdiff = state.absbestdiff;
-    let mut target_cache: Option<(f32, Vec<f32>)> = None;
+    // Cache for the target blurred at the candidate's blur radius.
+    // Only populated when the genome has an active blur; recomputed on ~5% of mutations.
+    let mut blurred_target_cache: Option<(f32, Vec<f32>)> = None;
 
     for _ in 0..batch_size {
         state.generation += 1;
@@ -618,8 +594,18 @@ fn run_batch<G: Genome>(
             candidate
         };
 
-        let target = effective_target(effective.blur_radius(), config, &mut target_cache);
-        let percdiff = effective.fitness(target, width, height, &mut fb);
+        let blurred_target = if let Some(r) = effective.blur_radius() {
+            let cache_miss = blurred_target_cache.as_ref().is_none_or(|(cr, _)| (cr - r).abs() > 1e-4);
+            if cache_miss {
+                blurred_target_cache = Some((r, apply_blur(&config.image, width, height, r)));
+            }
+            blurred_target_cache.as_ref().map(|(_, v)| v.as_slice())
+        } else {
+            blurred_target_cache = None;
+            None
+        };
+
+        let percdiff = effective.fitness(&config.image, blurred_target, width, height, &mut fb);
 
         let accept = percdiff < bestdiff
             || (state.temperature > 0.0
@@ -1013,7 +999,7 @@ where
 
         if top_n >= 2 {
             let mut scratch = vec![0.0f32; (width * height * 3) as usize];
-            let mut target_cache: Option<(f32, Vec<f32>)> = None;
+            let mut blurred_target_cache: Option<(f32, Vec<f32>)> = None;
             for i in 0..top.len() {
                 for j in (i + 1)..top.len() {
                     let raw_child = recombine_fn(&top[i].best_genome, &mut rng, &top[j].best_genome);
@@ -1022,10 +1008,21 @@ where
                     } else {
                         raw_child
                     };
-                    let child_diff = child.fitness(
-                        effective_target(child.blur_radius(), config, &mut target_cache),
-                        width, height, &mut scratch,
-                    );
+                    let blurred_target = if let Some(r) = child.blur_radius() {
+                        let cache_miss = blurred_target_cache
+                            .as_ref()
+                            .is_none_or(|(cr, _)| (cr - r).abs() > 1e-4);
+                        if cache_miss {
+                            blurred_target_cache =
+                                Some((r, apply_blur(&config.image, width, height, r)));
+                        }
+                        blurred_target_cache.as_ref().map(|(_, v)| v.as_slice())
+                    } else {
+                        blurred_target_cache = None;
+                        None
+                    };
+                    let child_diff =
+                        child.fitness(&config.image, blurred_target, width, height, &mut scratch);
                     if best_offspring_diff.is_none_or(|d| child_diff < d) {
                         best_offspring_diff = Some(child_diff);
                         best_offspring = Some(child);
