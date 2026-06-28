@@ -273,3 +273,29 @@ should reconstruct. Old checkpoints decode with the "re-run `shapeme setup`" mes
 provides concrete impls; `GridGenome` overrides all except `trim_to_budget`. The generic
 `run_process_loop` and `run_batch` functions use these trait methods so both genome types share
 the same annealing loop.
+
+### `--blur-target` (setup flag)
+
+`shapeme setup --blur-target` stores `StoredConfig.blur_target = true`. During `process`, the
+fitness function blurs the _target_ image with the same Gaussian radius as the current candidate
+before calling `compute_diff`. Without `--blur-target`, the target is always the sharp reference.
+
+**Why**: when the genome carries a large blur, every pixel-level diff penalises fine detail that
+the blur will erase anyway. Blurring both sides before diffing puts the fitness score in the same
+perceptual space as the output.
+
+**Blur inflation dynamic**: blurring both sides with the same radius reduces RMSE as radius grows
+(in the limit both images converge to their mean colour). This gives the annealer an incentive to
+increase blur independently of shape quality, and changes what the reported diff value means. This
+is expected and accepted behaviour when `--blur-target` is used.
+
+**Implementation** (`shapeme/src/main.rs`): `effective_target(blur_radius, config, cache) -> &[f32]`
+returns `&config.image` when `blur_target` is false or `blur_radius` is `None`; otherwise it
+recomputes (and caches) the blurred target. The cache is a local `Option<(f32, Vec<f32>)>` at
+each diff site — one per `run_batch` call and one for the recombination loop in `run_process_loop`.
+Since blur only changes on ~5% of mutations, cache misses are rare and the allocation cost is
+amortised.
+
+**Display sites are unchanged**: the SDL "show original" toggle (spacebar) and the initial window
+paint always display the sharp reference image regardless of `--blur-target`. The flag is
+fitness-only.
