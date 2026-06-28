@@ -27,12 +27,7 @@ pub trait Genome: Clone + Send + Sync {
 
     /// Return a mutated copy of this genome.
     #[must_use]
-    fn mutate(
-        &self,
-        rng: &mut impl Rng,
-        state: &AnnealingState,
-        config: &MutationConfig,
-    ) -> Self;
+    fn mutate(&self, rng: &mut impl Rng, state: &AnnealingState, config: &MutationConfig) -> Self;
 
     /// Produce an offspring genome from `self` and `other`.
     #[must_use]
@@ -61,7 +56,6 @@ impl ShapeGenome {
         genes.sort_unstable_by_key(|g| g.z_order());
         genes
     }
-
 
     /// The blur radius, if any.
     #[must_use]
@@ -123,8 +117,7 @@ impl ShapeGenome {
                     {
                         let za = a_sorted[k - 1].z_order();
                         let zb = b_sorted[k].z_order();
-                        hybrid.z_order =
-                            u32::midpoint(u32::from(za), u32::from(zb)) as u16;
+                        hybrid.z_order = u32::midpoint(u32::from(za), u32::from(zb)) as u16;
                         child[k - 1] = ShapeGene::Polygon(hybrid);
                     }
                 }
@@ -140,14 +133,22 @@ impl ShapeGenome {
         let blur = match (&self.blur, &other.blur) {
             (Some(a), Some(b)) => Some(a.recombine(b, rng)),
             (Some(b), None) | (None, Some(b)) => {
-                if rng.random_bool(0.5) { Some(b.clone()) } else { None }
+                if rng.random_bool(0.5) {
+                    Some(b.clone())
+                } else {
+                    None
+                }
             }
             (None, None) => None,
         };
 
         let background = self.background.recombine(&other.background, rng);
 
-        Self { shapes, blur, background }
+        Self {
+            shapes,
+            blur,
+            background,
+        }
     }
 }
 
@@ -158,7 +159,9 @@ impl Genome for ShapeGenome {
             pixel.copy_from_slice(&bg);
         }
         draw_genes(scratch, width, height, &self.shapes);
-        let blurred_opt = self.blur_radius().map(|r| apply_blur(scratch, width, height, r));
+        let blurred_opt = self
+            .blur_radius()
+            .map(|r| apply_blur(scratch, width, height, r));
         let display: &[f32] = blurred_opt.as_deref().unwrap_or(scratch);
         let diff = compute_diff(target, display);
         // RMSE is in [0, ~1.0]; multiply by 100 to express as a percentage.
@@ -169,12 +172,7 @@ impl Genome for ShapeGenome {
         clippy::too_many_lines,
         reason = "mutation branches mirror the original mutate_shapes logic; factoring them out adds noise"
     )]
-    fn mutate(
-        &self,
-        rng: &mut impl Rng,
-        state: &AnnealingState,
-        config: &MutationConfig,
-    ) -> Self {
+    fn mutate(&self, rng: &mut impl Rng, state: &AnnealingState, config: &MutationConfig) -> Self {
         const MUTATION_ATTEMPTS: usize = 10;
 
         let mut shapes = self.shapes.clone();
@@ -190,7 +188,11 @@ impl Genome for ShapeGenome {
             {
                 tracing::trace!(mutation = "add-gene", "adding shape gene");
                 shapes.push(candidate);
-                return Self { shapes, blur, background };
+                return Self {
+                    shapes,
+                    blur,
+                    background,
+                };
             }
             // Budget exceeded — fall through to normal mutation
         }
@@ -200,7 +202,11 @@ impl Genome for ShapeGenome {
             tracing::trace!(mutation = "remove-gene", "removing shape gene");
             let idx = rng.random_range(0..shapes.len());
             shapes.remove(idx);
-            return Self { shapes, blur, background };
+            return Self {
+                shapes,
+                blur,
+                background,
+            };
         }
 
         // ~5% chance: split a large polygon into two colour-diverged halves
@@ -208,9 +214,7 @@ impl Genome for ShapeGenome {
             let poly_indices: Vec<usize> = shapes
                 .iter()
                 .enumerate()
-                .filter(|(_, g)| {
-                    matches!(g, ShapeGene::Polygon(p) if p.vertices.len() >= 4)
-                })
+                .filter(|(_, g)| matches!(g, ShapeGene::Polygon(p) if p.vertices.len() >= 4))
                 .map(|(i, _)| i)
                 .collect();
             if !poly_indices.is_empty() {
@@ -237,7 +241,11 @@ impl Genome for ShapeGenome {
                                 mutation = "split-polygon",
                                 "split polygon into two colour-diverged halves"
                             );
-                            return Self { shapes, blur, background };
+                            return Self {
+                                shapes,
+                                blur,
+                                background,
+                            };
                         }
                     }
                 }
@@ -262,7 +270,11 @@ impl Genome for ShapeGenome {
             tracing::trace!(mutation = "nudge-blur", "nudging blur gene");
             blur = blur.map_or(Some(BlurGene { radius: 0.5 }), |b| {
                 let mutated = b.mutate(rng, config);
-                if mutated.radius < 0.1 { None } else { Some(mutated) }
+                if mutated.radius < 0.1 {
+                    None
+                } else {
+                    Some(mutated)
+                }
             });
         }
 
@@ -286,7 +298,11 @@ impl Genome for ShapeGenome {
             }
         }
 
-        Self { shapes, blur, background }
+        Self {
+            shapes,
+            blur,
+            background,
+        }
     }
 
     fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self {
@@ -320,14 +336,22 @@ impl Genome for ShapeGenome {
         let blur = match (&self.blur, &other.blur) {
             (Some(a), Some(b)) => Some(a.recombine(b, rng)),
             (Some(b), None) | (None, Some(b)) => {
-                if rng.random_bool(0.5) { Some(b.clone()) } else { None }
+                if rng.random_bool(0.5) {
+                    Some(b.clone())
+                } else {
+                    None
+                }
             }
             (None, None) => None,
         };
 
         let background = self.background.recombine(&other.background, rng);
 
-        Self { shapes, blur, background }
+        Self {
+            shapes,
+            blur,
+            background,
+        }
     }
 }
 
@@ -356,13 +380,23 @@ mod tests {
         ShapeGenome {
             shapes: vec![
                 ShapeGene::Triangle(TriangleGene {
-                    x1: 0, y1: 0, x2: 50, y2: 0, x3: 25, y3: 50,
+                    x1: 0,
+                    y1: 0,
+                    x2: 50,
+                    y2: 0,
+                    x3: 25,
+                    y3: 50,
                     oklab: [0.6279, -0.2516, 0.0000],
                     alpha: 50,
                     z_order: 100,
                 }),
                 ShapeGene::Triangle(TriangleGene {
-                    x1: 10, y1: 10, x2: 60, y2: 10, x3: 35, y3: 60,
+                    x1: 10,
+                    y1: 10,
+                    x2: 60,
+                    y2: 10,
+                    x3: 35,
+                    y3: 60,
                     oklab: [0.8664, -0.2334, 0.1795],
                     alpha: 50,
                     z_order: 200,
@@ -378,7 +412,12 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(42);
         let mut genome = ShapeGenome {
             shapes: vec![ShapeGene::Triangle(TriangleGene {
-                x1: 0, y1: 0, x2: 50, y2: 0, x3: 25, y3: 50,
+                x1: 0,
+                y1: 0,
+                x2: 50,
+                y2: 0,
+                x3: 25,
+                y3: 50,
                 oklab: [0.5987, 0.0, 0.0],
                 alpha: 50,
                 z_order: 0,
@@ -401,7 +440,10 @@ mod tests {
         let b = sample_genome();
         for _ in 0..100 {
             let child = a.recombine(&b, &mut rng);
-            assert!(!child.shapes.is_empty(), "recombined genome must not be empty");
+            assert!(
+                !child.shapes.is_empty(),
+                "recombined genome must not be empty"
+            );
         }
     }
 
@@ -443,7 +485,10 @@ mod tests {
                 break;
             }
         }
-        assert!(found_split, "split mutation should fire within 500 attempts");
+        assert!(
+            found_split,
+            "split mutation should fire within 500 attempts"
+        );
     }
 
     #[test]
@@ -462,13 +507,17 @@ mod tests {
         let genome = ShapeGenome {
             shapes: vec![
                 ShapeGene::Circle(CircleGene {
-                    cx: 20, cy: 20, radius: 5,
+                    cx: 20,
+                    cy: 20,
+                    radius: 5,
                     oklab: [0.5, 0.0, 0.0],
                     alpha: 50,
                     z_order: 200,
                 }),
                 ShapeGene::Circle(CircleGene {
-                    cx: 10, cy: 10, radius: 5,
+                    cx: 10,
+                    cy: 10,
+                    radius: 5,
                     oklab: [0.5, 0.0, 0.0],
                     alpha: 50,
                     z_order: 100,

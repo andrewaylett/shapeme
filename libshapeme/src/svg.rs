@@ -99,7 +99,17 @@ pub fn build_svg(
 
 fn push_gene(s: &mut String, gene: &ShapeGene, compact: bool) {
     match gene {
-        ShapeGene::Triangle(TriangleGene { x1, y1, x2, y2, x3, y3, oklab, alpha, .. }) => {
+        ShapeGene::Triangle(TriangleGene {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+            oklab,
+            alpha,
+            ..
+        }) => {
             let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             if compact {
@@ -120,7 +130,14 @@ fn push_gene(s: &mut String, gene: &ShapeGene, compact: bool) {
                 .expect("String write is infallible");
             }
         }
-        ShapeGene::Circle(CircleGene { cx, cy, radius, oklab, alpha, .. }) => {
+        ShapeGene::Circle(CircleGene {
+            cx,
+            cy,
+            radius,
+            oklab,
+            alpha,
+            ..
+        }) => {
             let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             if compact {
@@ -141,7 +158,12 @@ fn push_gene(s: &mut String, gene: &ShapeGene, compact: bool) {
                 .expect("String write is infallible");
             }
         }
-        ShapeGene::Polygon(PolygonGene { vertices, oklab, alpha, .. }) => {
+        ShapeGene::Polygon(PolygonGene {
+            vertices,
+            oklab,
+            alpha,
+            ..
+        }) => {
             let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
             let a = f32::from(*alpha) / 100.0;
             let pts: String = vertices
@@ -182,7 +204,14 @@ pub fn build_svg_from_genome(
 ) -> String {
     let genes: Vec<&ShapeGene> = genome.sorted_genes();
     let owned: Vec<ShapeGene> = genes.into_iter().cloned().collect();
-    build_svg(&owned, width, height, genome.blur_radius(), genome.background_oklab(), compact)
+    build_svg(
+        &owned,
+        width,
+        height,
+        genome.blur_radius(),
+        genome.background_oklab(),
+        compact,
+    )
 }
 
 /// Percent-encode a compact SVG string for use as a `data:image/svg+xml,` URL.
@@ -222,7 +251,10 @@ mod tests {
     #[test]
     fn build_svg_compact_has_viewbox_and_preserveaspectratio() {
         let svg = build_svg(&sample_triangle(), 100, 200, None, [0.0, 0.0, 0.0], true);
-        assert!(svg.contains("viewBox='0 0 100 200'"), "missing viewBox: {svg}");
+        assert!(
+            svg.contains("viewBox='0 0 100 200'"),
+            "missing viewBox: {svg}"
+        );
         assert!(
             svg.contains("preserveAspectRatio='xMidYMid slice'"),
             "missing preserveAspectRatio: {svg}"
@@ -231,15 +263,32 @@ mod tests {
 
     #[test]
     fn build_svg_compact_is_single_line() {
-        let svg = build_svg(&sample_triangle(), 100, 100, Some(4.0), [0.0, 0.0, 0.0], true);
+        let svg = build_svg(
+            &sample_triangle(),
+            100,
+            100,
+            Some(4.0),
+            [0.0, 0.0, 0.0],
+            true,
+        );
         assert!(!svg.contains('\n'), "compact SVG must not contain newlines");
     }
 
     #[test]
     fn build_svg_compact_includes_blur_filter() {
-        let svg = build_svg(&sample_triangle(), 100, 100, Some(8.0), [0.0, 0.0, 0.0], true);
+        let svg = build_svg(
+            &sample_triangle(),
+            100,
+            100,
+            Some(8.0),
+            [0.0, 0.0, 0.0],
+            true,
+        );
         assert!(svg.contains("feGaussianBlur"), "missing blur filter: {svg}");
-        assert!(svg.contains("stdDeviation='8'"), "wrong stdDeviation: {svg}");
+        assert!(
+            svg.contains("stdDeviation='8'"),
+            "wrong stdDeviation: {svg}"
+        );
     }
 
     #[test]
@@ -258,7 +307,10 @@ mod tests {
     #[test]
     fn svg_to_data_url_encodes_special_chars() {
         let url = svg_to_data_url("<svg><rect fill='#fff'/></svg>");
-        assert!(url.starts_with("data:image/svg+xml,"), "wrong prefix: {url}");
+        assert!(
+            url.starts_with("data:image/svg+xml,"),
+            "wrong prefix: {url}"
+        );
         assert!(url.contains("%3C"), "< not encoded: {url}");
         assert!(url.contains("%3E"), "> not encoded: {url}");
         assert!(url.contains("%23"), "# not encoded: {url}");

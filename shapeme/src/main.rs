@@ -21,8 +21,8 @@ use tracing::Level;
 
 use libshapeme::annealing::AnnealingState;
 use libshapeme::gene::{
-    BackgroundGene, BlurGene, MutationConfig, ShapeGene, CIRCLE_COST, POLYGON_BASE_COST,
-    POLYGON_VERTEX_COST, TRIANGLE_COST,
+    BackgroundGene, BlurGene, CIRCLE_COST, CircleGene, MutationConfig, POLYGON_BASE_COST,
+    POLYGON_VERTEX_COST, ShapeGene, TRIANGLE_COST,
 };
 use libshapeme::genome::{Genome, ShapeGenome};
 use libshapeme::oklab;
@@ -51,6 +51,16 @@ enum Command {
     Setup(SetupArgs),
     /// Load a checkpoint and run the annealing optimiser.
     Process(ProcessArgs),
+}
+
+/// How `setup` should initialise the starting genome.
+#[derive(clap::ValueEnum, Debug, Clone, Default)]
+enum StartMode {
+    /// Empty genome; `process` fills it with random shapes on first launch (default).
+    #[default]
+    Blank,
+    /// Neutral-grey circle grid sized to fill the --max-shapes budget (and trimmed to --max-bytes if set); radius and blur set to half the inter-centre spacing.
+    Circles,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -84,6 +94,9 @@ struct SetupArgs {
     /// Downsample input so max(width, height) ≤ N; set to 0 to disable
     #[arg(long, default_value = "256")]
     max_dimension: u32,
+    /// Starting genome layout written into the checkpoint.
+    #[arg(long, value_enum, default_value = "blank")]
+    start: StartMode,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -251,7 +264,10 @@ fn finalize(
     state: &AnnealingState,
     print_data_url: bool,
 ) -> Result<()> {
-    write_svg(output_svg, &build_svg_from_genome(genome, config.width, config.height, false))?;
+    write_svg(
+        output_svg,
+        &build_svg_from_genome(genome, config.width, config.height, false),
+    )?;
     save_binary(checkpoint, config, state, genome)?;
     if print_data_url {
         let compact = build_svg_from_genome(genome, config.width, config.height, true);
@@ -262,7 +278,15 @@ fn finalize(
 
 fn setup(args: &SetupArgs) -> Result<()> {
     let use_triangles = args.use_triangles != 0;
-    let use_circles = args.use_circles != 0;
+    // --start circles forces circles on even if --use-circles was not set
+    let use_circles = if matches!(args.start, StartMode::Circles) {
+        if args.use_circles == 0 {
+            tracing::warn!("--start circles forces --use-circles on");
+        }
+        true
+    } else {
+        args.use_circles != 0
+    };
     let use_polygons = args.use_polygons != 0;
     if !use_triangles && !use_circles && !use_polygons {
         anyhow::bail!(
@@ -282,7 +306,101 @@ fn setup(args: &SetupArgs) -> Result<()> {
     let image = oklab::image_srgb_to_oklab(&scaled_pixels);
     tracing::info!(width, height, "image loaded");
 
-    let max_shapes = args.max_shapes.max(args.initial_shapes);
+    // Build the initial genome before StoredConfig so that circle-grid mode can set
+    // initial_shapes to the actual circle count, giving process --restart a comparable budget.
+    let initial_genome = match args.start {
+        StartMode::Blank => ShapeGenome {
+            shapes: vec![],
+            blur: None,
+            background: BackgroundGene::default(),
+        },
+        StartMode::Circles => {
+            let grey = [0.5f32, 0.0, 0.0];
+            let n_shapes = (args.max_shapes * TRIANGLE_COST / CIRCLE_COST).max(1);
+
+            // Grid geometry for a given circle count
+            let grid_geom = |n: usize| -> (usize, usize, f64, f64, i16, f32) {
+                let aspect = width as f64 / height as f64;
+                let cols = ((n as f64 * aspect).sqrt().floor() as usize).max(1);
+                let rows = (n / cols).max(1);
+                let cell_w = width as f64 / cols as f64;
+                let cell_h = height as f64 / rows as f64;
+                let spacing = cell_w.min(cell_h);
+                let radius = ((spacing / 2.0).round() as i16).max(1);
+                let blur_r = (spacing / 2.0) as f32;
+                (cols, rows, cell_w, cell_h, radius, blur_r)
+            };
+
+            // If max_bytes is set, binary-search for the largest n whose SVG fits
+            let n = if let Some(max_bytes) = args.max_bytes {
+                let fits = |n: usize| -> bool {
+                    let (cols, rows, cell_w, cell_h, radius, blur_r) = grid_geom(n);
+                    let shapes: Vec<ShapeGene> = (0..rows)
+                        .flat_map(|row| {
+                            (0..cols).map(move |col| {
+                                let cx = (cell_w * (col as f64 + 0.5)).round() as i16;
+                                let cy = (cell_h * (row as f64 + 0.5)).round() as i16;
+                                ShapeGene::Circle(CircleGene {
+                                    cx,
+                                    cy,
+                                    radius,
+                                    oklab: grey,
+                                    alpha: 50,
+                                    z_order: (row * cols + col) as u16,
+                                })
+                            })
+                        })
+                        .collect();
+                    let svg = build_svg(&shapes, width, height, Some(blur_r), grey, true);
+                    svg_to_data_url(&svg).len() <= max_bytes
+                };
+                if fits(n_shapes) {
+                    n_shapes
+                } else {
+                    let mut lo = 1usize;
+                    let mut hi = n_shapes;
+                    while lo < hi {
+                        let mid = (lo + hi + 1) / 2;
+                        if fits(mid) { lo = mid; } else { hi = mid - 1; }
+                    }
+                    lo
+                }
+            } else {
+                n_shapes
+            };
+
+            let (cols, rows, cell_w, cell_h, radius, blur_r) = grid_geom(n);
+            let mut shapes = Vec::with_capacity(cols * rows);
+            let mut z = 0u16;
+            for row in 0..rows {
+                for col in 0..cols {
+                    let cx = (cell_w * (col as f64 + 0.5)).round() as i16;
+                    let cy = (cell_h * (row as f64 + 0.5)).round() as i16;
+                    shapes.push(ShapeGene::Circle(CircleGene {
+                        cx,
+                        cy,
+                        radius,
+                        oklab: grey,
+                        alpha: 50,
+                        z_order: z,
+                    }));
+                    z += 1;
+                }
+            }
+            tracing::info!(count = shapes.len(), cols, rows, radius, blur = blur_r, "circle grid initialised");
+            ShapeGenome {
+                shapes,
+                blur: Some(BlurGene { radius: blur_r }),
+                background: BackgroundGene { oklab: grey },
+            }
+        }
+    };
+
+    let initial_shapes = match args.start {
+        StartMode::Circles => initial_genome.shapes.len(),
+        StartMode::Blank => args.initial_shapes,
+    };
+    let max_shapes = args.max_shapes.max(initial_shapes);
 
     let config = StoredConfig {
         image,
@@ -295,20 +413,14 @@ fn setup(args: &SetupArgs) -> Result<()> {
         max_bytes: args.max_bytes,
         output_svg: args.output_svg.clone(),
         max_shapes,
-        initial_shapes: args.initial_shapes,
+        initial_shapes,
         initial_blur_radius: args.blur_radius,
     };
 
-    let mut state =
-        AnnealingState::new(max_shapes * TRIANGLE_COST, args.initial_shapes * TRIANGLE_COST);
+    let mut state = AnnealingState::new(max_shapes * TRIANGLE_COST, initial_shapes * TRIANGLE_COST);
     state.blur_radius = args.blur_radius;
 
-    let empty_genome = ShapeGenome {
-        shapes: vec![],
-        blur: None,
-        background: BackgroundGene::default(),
-    };
-    save_binary(&args.checkpoint, &config, &state, &empty_genome)?;
+    save_binary(&args.checkpoint, &config, &state, &initial_genome)?;
     tracing::info!(path = %args.checkpoint.display(), "checkpoint written");
     Ok(())
 }
@@ -370,7 +482,11 @@ fn trim_genome_to_budget(
         shapes.pop();
     }
 
-    ShapeGenome { shapes, blur, background }
+    ShapeGenome {
+        shapes,
+        blur,
+        background,
+    }
 }
 
 #[allow(
@@ -523,7 +639,11 @@ fn process(args: &ProcessArgs) -> Result<()> {
             .map(|i| ShapeGene::random_full(&mut rng, &mutation_config, i as u16))
             .collect();
         let blur = config.initial_blur_radius.map(|r| BlurGene { radius: r });
-        ShapeGenome { shapes: genes, blur, background: BackgroundGene::default() }
+        ShapeGenome {
+            shapes: genes,
+            blur,
+            background: BackgroundGene::default(),
+        }
     } else {
         saved_genome
     };
@@ -551,7 +671,9 @@ fn process(args: &ProcessArgs) -> Result<()> {
         .map_or_else(|| fb.clone(), |r| apply_blur(&fb, width, height, r));
 
     if let Some(ctx) = &mut sdl_ctx {
-        let blurred = absbest_genome.blur_radius().map(|r| apply_blur(&fb, width, height, r));
+        let blurred = absbest_genome
+            .blur_radius()
+            .map(|r| apply_blur(&fb, width, height, r));
         let display = blurred.as_deref().unwrap_or(&fb);
         let display_rgb = oklab::image_oklab_to_srgb(display);
         let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
@@ -761,7 +883,10 @@ fn process(args: &ProcessArgs) -> Result<()> {
         }
 
         // Winner is the best batch result, potentially beaten by a recombination offspring
-        let batch_winner = results_sorted.into_iter().next().expect("parallel_batches > 0");
+        let batch_winner = results_sorted
+            .into_iter()
+            .next()
+            .expect("parallel_batches > 0");
         let (winner_genome, winner_state) = if let (Some(offspring), Some(offspring_diff)) =
             (best_offspring, best_offspring_diff)
         {
@@ -801,7 +926,9 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 pixel.copy_from_slice(&bg);
             }
             draw_genes(&mut fb, width, height, &absbest_genome.shapes);
-            let blurred = absbest_genome.blur_radius().map(|r| apply_blur(&fb, width, height, r));
+            let blurred = absbest_genome
+                .blur_radius()
+                .map(|r| apply_blur(&fb, width, height, r));
             let display = blurred.as_deref().unwrap_or(&fb);
             last_display_buf.clear();
             last_display_buf.extend_from_slice(display);

@@ -140,7 +140,10 @@ mod tests {
     #[test]
     fn black_round_trips() {
         let (r, g, b) = round_trip(0, 0, 0);
-        assert!(within_1(r, 0) && within_1(g, 0) && within_1(b, 0), "black failed: ({r},{g},{b})");
+        assert!(
+            within_1(r, 0) && within_1(g, 0) && within_1(b, 0),
+            "black failed: ({r},{g},{b})"
+        );
     }
 
     #[test]
@@ -166,17 +169,41 @@ mod tests {
     #[test]
     fn black_oklab_is_zero() {
         let lab = srgb_u8_to_oklab(0, 0, 0);
-        assert!(lab[0].abs() < 1e-4, "L for black should be ~0, got {}", lab[0]);
-        assert!(lab[1].abs() < 1e-4, "a for black should be ~0, got {}", lab[1]);
-        assert!(lab[2].abs() < 1e-4, "b for black should be ~0, got {}", lab[2]);
+        assert!(
+            lab[0].abs() < 1e-4,
+            "L for black should be ~0, got {}",
+            lab[0]
+        );
+        assert!(
+            lab[1].abs() < 1e-4,
+            "a for black should be ~0, got {}",
+            lab[1]
+        );
+        assert!(
+            lab[2].abs() < 1e-4,
+            "b for black should be ~0, got {}",
+            lab[2]
+        );
     }
 
     #[test]
     fn white_oklab_l_is_one() {
         let lab = srgb_u8_to_oklab(255, 255, 255);
-        assert!((lab[0] - 1.0).abs() < 1e-4, "L for white should be ~1, got {}", lab[0]);
-        assert!(lab[1].abs() < 1e-4, "a for white should be ~0, got {}", lab[1]);
-        assert!(lab[2].abs() < 1e-4, "b for white should be ~0, got {}", lab[2]);
+        assert!(
+            (lab[0] - 1.0).abs() < 1e-4,
+            "L for white should be ~1, got {}",
+            lab[0]
+        );
+        assert!(
+            lab[1].abs() < 1e-4,
+            "a for white should be ~0, got {}",
+            lab[1]
+        );
+        assert!(
+            lab[2].abs() < 1e-4,
+            "b for white should be ~0, got {}",
+            lab[2]
+        );
     }
 
     #[test]

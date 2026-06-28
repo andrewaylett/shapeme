@@ -10,11 +10,11 @@ pub mod annealing;
 pub mod gene;
 /// Genome-level traits and types (`ShapeGenome`, `Genome` trait).
 pub mod genome;
+/// OKlab perceptually uniform colour space conversions.
+pub mod oklab;
 /// Framebuffer rasterisation, blur, and diff computation.
 pub mod render;
 /// Shape types and mutation/generation functions.
 pub mod shapes;
 /// SVG generation and data URL encoding.
 pub mod svg;
-/// OKlab perceptually uniform colour space conversions.
-pub mod oklab;

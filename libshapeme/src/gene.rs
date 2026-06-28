@@ -18,7 +18,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::shapes::{
-    MINALPHA, MAXALPHA, ShapeKind, clamp_coord, nudge_oklab, rand_between, random_oklab_color,
+    MAXALPHA, MINALPHA, ShapeKind, clamp_coord, nudge_oklab, rand_between, random_oklab_color,
     select_shape_type,
 };
 
@@ -175,7 +175,11 @@ impl Gene for TriangleGene {
     }
 
     fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self {
-        if rng.random_bool(0.5) { self.clone() } else { other.clone() }
+        if rng.random_bool(0.5) {
+            self.clone()
+        } else {
+            other.clone()
+        }
     }
 }
 
@@ -245,7 +249,11 @@ impl Gene for CircleGene {
     }
 
     fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self {
-        if rng.random_bool(0.5) { self.clone() } else { other.clone() }
+        if rng.random_bool(0.5) {
+            self.clone()
+        } else {
+            other.clone()
+        }
     }
 }
 
@@ -279,7 +287,9 @@ impl PolygonGene {
         self.vertices.sort_unstable_by(|(ax, ay), (bx, by)| {
             let a_angle = (*ay as f32 - cy).atan2(*ax as f32 - cx);
             let b_angle = (*by as f32 - cy).atan2(*bx as f32 - cx);
-            a_angle.partial_cmp(&b_angle).unwrap_or(std::cmp::Ordering::Equal)
+            a_angle
+                .partial_cmp(&b_angle)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 
@@ -383,9 +393,8 @@ impl PolygonGene {
         }
 
         let oklab = std::array::from_fn(|i| f32::midpoint(self.oklab[i], other.oklab[i]));
-        let alpha =
-            u16::midpoint(u16::from(self.alpha), u16::from(other.alpha)).max(u16::from(MINALPHA))
-                as u8;
+        let alpha = u16::midpoint(u16::from(self.alpha), u16::from(other.alpha))
+            .max(u16::from(MINALPHA)) as u8;
 
         let mut result = Self {
             vertices: combined,
@@ -448,9 +457,11 @@ impl Gene for PolygonGene {
                     let (x1, y1) = g.vertices[edge];
                     let (x2, y2) = g.vertices[(edge + 1) % n];
                     let mx = ((x1 as i32 + x2 as i32) / 2 + rand_between(rng, -20, 20))
-                        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        .clamp(i16::MIN as i32, i16::MAX as i32)
+                        as i16;
                     let my = ((y1 as i32 + y2 as i32) / 2 + rand_between(rng, -20, 20))
-                        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        .clamp(i16::MIN as i32, i16::MAX as i32)
+                        as i16;
                     g.vertices.insert(edge + 1, (mx, my));
                 } else {
                     for (vx, vy) in &mut g.vertices {
@@ -478,7 +489,11 @@ impl Gene for PolygonGene {
     }
 
     fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self {
-        if rng.random_bool(0.5) { self.clone() } else { other.clone() }
+        if rng.random_bool(0.5) {
+            self.clone()
+        } else {
+            other.clone()
+        }
     }
 }
 
@@ -547,8 +562,12 @@ impl ShapeGene {
         let width = config.width;
         let height = config.height;
         let margin = config.margin;
-        match select_shape_type(rng, config.use_triangles, config.use_circles, config.use_polygons)
-        {
+        match select_shape_type(
+            rng,
+            config.use_triangles,
+            config.use_circles,
+            config.use_polygons,
+        ) {
             ShapeKind::Triangle => {
                 let mut g = TriangleGene {
                     x1: (rng.random::<u32>() % width) as i16,
@@ -586,7 +605,12 @@ impl ShapeGene {
                         )
                     })
                     .collect();
-                let mut g = PolygonGene { vertices, oklab, alpha, z_order };
+                let mut g = PolygonGene {
+                    vertices,
+                    oklab,
+                    alpha,
+                    z_order,
+                };
                 g.normalize(width, height, margin);
                 Self::Polygon(g)
             }
@@ -600,8 +624,12 @@ impl ShapeGene {
         let margin = config.margin;
         let x = (rng.random::<u32>() % width) as i32;
         let y = (rng.random::<u32>() % height) as i32;
-        match select_shape_type(rng, config.use_triangles, config.use_circles, config.use_polygons)
-        {
+        match select_shape_type(
+            rng,
+            config.use_triangles,
+            config.use_circles,
+            config.use_polygons,
+        ) {
             ShapeKind::Triangle => {
                 let mut g = TriangleGene {
                     x1: (x + rand_between(rng, -delta, delta)) as i16,
@@ -639,7 +667,12 @@ impl ShapeGene {
                         )
                     })
                     .collect();
-                let mut g = PolygonGene { vertices, oklab, alpha, z_order };
+                let mut g = PolygonGene {
+                    vertices,
+                    oklab,
+                    alpha,
+                    z_order,
+                };
                 g.normalize(width, height, margin);
                 Self::Polygon(g)
             }
@@ -671,9 +704,12 @@ impl Gene for ShapeGene {
     fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self {
         // Blending across shape variants is ill-defined; pick one parent's gene wholesale.
         // z_order midpoint preserves approximate layering from both parents.
-        let z_mid =
-            u32::midpoint(u32::from(self.z_order()), u32::from(other.z_order())) as u16;
-        let mut child = if rng.random_bool(0.5) { self.clone() } else { other.clone() };
+        let z_mid = u32::midpoint(u32::from(self.z_order()), u32::from(other.z_order())) as u16;
+        let mut child = if rng.random_bool(0.5) {
+            self.clone()
+        } else {
+            other.clone()
+        };
         child.set_z_order(z_mid);
         child
     }
@@ -698,7 +734,9 @@ impl Gene for BackgroundGene {
             let (oklab, _) = random_oklab_color(rng);
             Self { oklab }
         } else {
-            Self { oklab: nudge_oklab(rng, self.oklab) }
+            Self {
+                oklab: nudge_oklab(rng, self.oklab),
+            }
         }
     }
 
@@ -757,7 +795,12 @@ mod tests {
 
     fn sample_triangle_gene() -> TriangleGene {
         TriangleGene {
-            x1: 0, y1: 0, x2: 50, y2: 0, x3: 25, y3: 50,
+            x1: 0,
+            y1: 0,
+            x2: 50,
+            y2: 0,
+            x3: 25,
+            y3: 50,
             oklab: [0.5, 0.0, 0.0],
             alpha: 50,
             z_order: 100,
@@ -780,21 +823,29 @@ mod tests {
     #[test]
     fn triangle_normalise_sorts_by_y() {
         let mut g = TriangleGene {
-            x1: 10, y1: 30,
-            x2: 20, y2: 10,
-            x3: 30, y3: 20,
+            x1: 10,
+            y1: 30,
+            x2: 20,
+            y2: 10,
+            x3: 30,
+            y3: 20,
             oklab: black_oklab(),
             alpha: 50,
             z_order: 0,
         };
         g.normalize(100, 100, 0);
-        assert!(g.y1 <= g.y2 && g.y2 <= g.y3, "y values must be non-decreasing after normalise");
+        assert!(
+            g.y1 <= g.y2 && g.y2 <= g.y3,
+            "y values must be non-decreasing after normalise"
+        );
     }
 
     #[test]
     fn circle_normalise_clamps_centre_only() {
         let mut g = CircleGene {
-            cx: -200, cy: 300, radius: 100,
+            cx: -200,
+            cy: 300,
+            radius: 100,
             oklab: black_oklab(),
             alpha: 50,
             z_order: 0,
@@ -824,9 +875,12 @@ mod tests {
     fn normalise_with_margin_allows_coords_outside_image() {
         let margin: i16 = 10;
         let mut g = TriangleGene {
-            x1: -5, y1: -5,
-            x2: 104, y2: 5,
-            x3: 5, y3: 104,
+            x1: -5,
+            y1: -5,
+            x2: 104,
+            y2: 5,
+            x3: 5,
+            y3: 104,
             oklab: black_oklab(),
             alpha: 50,
             z_order: 0,
@@ -837,7 +891,10 @@ mod tests {
         assert_eq!(g.x2, 104, "x2 within margin should be unchanged");
         assert_eq!(g.x3, 5, "x3 in-bounds should be unchanged");
         assert_eq!(g.y3, 104, "y3 within margin should be unchanged");
-        assert!(g.y1 <= g.y2 && g.y2 <= g.y3, "y values must be non-decreasing");
+        assert!(
+            g.y1 <= g.y2 && g.y2 <= g.y3,
+            "y values must be non-decreasing"
+        );
     }
 
     #[test]
@@ -973,10 +1030,21 @@ mod tests {
             z_order: 10,
         };
         let result = g.split(&mut rng, 200, 200, 0);
-        assert!(result.is_some(), "split should succeed on a 6-vertex polygon");
+        assert!(
+            result.is_some(),
+            "split should succeed on a 6-vertex polygon"
+        );
         let (a, b) = result.unwrap();
-        assert!(a.vertices.len() >= 3, "half A must have >= 3 vertices, got {}", a.vertices.len());
-        assert!(b.vertices.len() >= 3, "half B must have >= 3 vertices, got {}", b.vertices.len());
+        assert!(
+            a.vertices.len() >= 3,
+            "half A must have >= 3 vertices, got {}",
+            a.vertices.len()
+        );
+        assert!(
+            b.vertices.len() >= 3,
+            "half B must have >= 3 vertices, got {}",
+            b.vertices.len()
+        );
         // Shared-endpoint split: each output polygon includes both chord endpoints,
         // so combined count is n + 2.
         assert_eq!(
@@ -1029,19 +1097,29 @@ mod tests {
                 break;
             }
         }
-        assert!(found, "expected at least one successful crossover in 200 tries");
+        assert!(
+            found,
+            "expected at least one successful crossover in 200 tries"
+        );
     }
 
     #[test]
     fn gene_costs_are_in_plausible_range() {
         let triangle_gene = ShapeGene::Triangle(TriangleGene {
-            x1: 0, y1: 0, x2: 50, y2: 0, x3: 25, y3: 50,
+            x1: 0,
+            y1: 0,
+            x2: 50,
+            y2: 0,
+            x3: 25,
+            y3: 50,
             oklab: [0.5, 0.0, 0.0],
             alpha: 50,
             z_order: 100,
         });
         let circle_gene = ShapeGene::Circle(CircleGene {
-            cx: 25, cy: 25, radius: 10,
+            cx: 25,
+            cy: 25,
+            radius: 10,
             oklab: [0.5, 0.0, 0.0],
             alpha: 50,
             z_order: 100,
@@ -1050,10 +1128,9 @@ mod tests {
             bincode::serde::encode_to_vec(&triangle_gene, bincode::config::standard())
                 .expect("encode")
                 .len();
-        let circle_bytes =
-            bincode::serde::encode_to_vec(&circle_gene, bincode::config::standard())
-                .expect("encode")
-                .len();
+        let circle_bytes = bincode::serde::encode_to_vec(&circle_gene, bincode::config::standard())
+            .expect("encode")
+            .len();
         // Allow 50% variance: constants are heuristics for a 256×256 image with typical coords.
         assert!(
             triangle_bytes <= TRIANGLE_COST * 3 / 2,
@@ -1063,6 +1140,9 @@ mod tests {
             circle_bytes <= CIRCLE_COST * 3 / 2,
             "CIRCLE_COST far off: actual={circle_bytes}, const={CIRCLE_COST}"
         );
-        assert!(TRIANGLE_COST > CIRCLE_COST, "triangle must cost more than circle");
+        assert!(
+            TRIANGLE_COST > CIRCLE_COST,
+            "triangle must cost more than circle"
+        );
     }
 }

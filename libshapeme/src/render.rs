@@ -35,7 +35,7 @@ fn draw_hline(
     let row = y as u32 * width;
     for x in x1..=x2 {
         let base = ((row + x) * 3) as usize;
-        fb[base]     = alpha * color[0] + inv * fb[base];
+        fb[base] = alpha * color[0] + inv * fb[base];
         fb[base + 1] = alpha * color[1] + inv * fb[base + 1];
         fb[base + 2] = alpha * color[2] + inv * fb[base + 2];
     }
@@ -113,21 +113,27 @@ fn draw_triangle(
 
     if dx1 > dx2 {
         while sy <= by {
-            draw_hline(fb, width, height, sx as i32, ex as i32, sy as i32, color, alpha);
+            draw_hline(
+                fb, width, height, sx as i32, ex as i32, sy as i32, color, alpha,
+            );
             sy += 1.0;
             sx += dx2;
             ex += dx1;
         }
         ex = bx;
         while sy <= cy {
-            draw_hline(fb, width, height, sx as i32, ex as i32, sy as i32, color, alpha);
+            draw_hline(
+                fb, width, height, sx as i32, ex as i32, sy as i32, color, alpha,
+            );
             sy += 1.0;
             sx += dx2;
             ex += dx3;
         }
     } else {
         while sy <= by {
-            draw_hline(fb, width, height, sx as i32, ex as i32, sy as i32, color, alpha);
+            draw_hline(
+                fb, width, height, sx as i32, ex as i32, sy as i32, color, alpha,
+            );
             sy += 1.0;
             sx += dx1;
             ex += dx2;
@@ -135,7 +141,9 @@ fn draw_triangle(
         sx = bx;
         sy = by + 1.0;
         while sy <= cy {
-            draw_hline(fb, width, height, sx as i32, ex as i32, sy as i32, color, alpha);
+            draw_hline(
+                fb, width, height, sx as i32, ex as i32, sy as i32, color, alpha,
+            );
             sy += 1.0;
             sx += dx3;
             ex += dx2;
@@ -159,13 +167,24 @@ fn draw_polygon(
     if n < 3 {
         return;
     }
-    let y_min = vertices.iter().map(|v| v.1).min().expect("vertices is non-empty") as i32;
-    let y_max = vertices.iter().map(|v| v.1).max().expect("vertices is non-empty") as i32;
+    let y_min = vertices
+        .iter()
+        .map(|v| v.1)
+        .min()
+        .expect("vertices is non-empty") as i32;
+    let y_max = vertices
+        .iter()
+        .map(|v| v.1)
+        .max()
+        .expect("vertices is non-empty") as i32;
     for y in y_min..=y_max {
         let mut xs: Vec<i32> = Vec::new();
         for i in 0..n {
             let (x1, y1) = (vertices[i].0 as i32, vertices[i].1 as i32);
-            let (x2, y2) = (vertices[(i + 1) % n].0 as i32, vertices[(i + 1) % n].1 as i32);
+            let (x2, y2) = (
+                vertices[(i + 1) % n].0 as i32,
+                vertices[(i + 1) % n].1 as i32,
+            );
             // Include the lower endpoint, exclude the upper — avoids double-counting at vertices.
             if (y1 <= y && y < y2) || (y2 <= y && y < y1) {
                 let x = x1 + (y - y1) * (x2 - x1) / (y2 - y1);
@@ -195,13 +214,56 @@ pub fn draw_genes(fb: &mut [f32], width: u32, height: u32, genes: &[ShapeGene]) 
 
 fn draw_gene_inner(fb: &mut [f32], width: u32, height: u32, gene: &ShapeGene) {
     match gene {
-        ShapeGene::Triangle(TriangleGene { x1, y1, x2, y2, x3, y3, oklab, alpha, .. }) => {
-            draw_triangle(fb, width, height, *x1, *y1, *x2, *y2, *x3, *y3, *oklab, *alpha as f32 / 100.0);
+        ShapeGene::Triangle(TriangleGene {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+            oklab,
+            alpha,
+            ..
+        }) => {
+            draw_triangle(
+                fb,
+                width,
+                height,
+                *x1,
+                *y1,
+                *x2,
+                *y2,
+                *x3,
+                *y3,
+                *oklab,
+                *alpha as f32 / 100.0,
+            );
         }
-        ShapeGene::Circle(CircleGene { cx, cy, radius, oklab, alpha, .. }) => {
-            draw_circle(fb, width, height, *cx, *cy, *radius, *oklab, *alpha as f32 / 100.0);
+        ShapeGene::Circle(CircleGene {
+            cx,
+            cy,
+            radius,
+            oklab,
+            alpha,
+            ..
+        }) => {
+            draw_circle(
+                fb,
+                width,
+                height,
+                *cx,
+                *cy,
+                *radius,
+                *oklab,
+                *alpha as f32 / 100.0,
+            );
         }
-        ShapeGene::Polygon(PolygonGene { vertices, oklab, alpha, .. }) => {
+        ShapeGene::Polygon(PolygonGene {
+            vertices,
+            oklab,
+            alpha,
+            ..
+        }) => {
             draw_polygon(fb, width, height, vertices, *oklab, *alpha as f32 / 100.0);
         }
     }
@@ -246,12 +308,7 @@ pub fn compute_diff(a: &[f32], b: &[f32]) -> f64 {
 /// clips negative f32 values to 0, which would destroy the negative `a`/`b` channels
 /// that represent cool/blue `OKlab` colours and introduce a warm (sepia) bias.
 #[must_use]
-pub fn scale_image(
-    pixels: Vec<u8>,
-    width: u32,
-    height: u32,
-    max_dim: u32,
-) -> (Vec<u8>, u32, u32) {
+pub fn scale_image(pixels: Vec<u8>, width: u32, height: u32, max_dim: u32) -> (Vec<u8>, u32, u32) {
     if width.max(height) <= max_dim {
         return (pixels, width, height);
     }

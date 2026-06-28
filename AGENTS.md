@@ -18,16 +18,16 @@ The dividing line: _file access in the binary, the library works on state_.
 
 ## Architecture
 
-| Crate / Module          | Responsibility                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------ |
-| `libshapeme::shapes`    | Utility helpers: `random_oklab_color`, `nudge_oklab`, `rand_between`, `clamp_coord`, shape-kind selection |
+| Crate / Module          | Responsibility                                                                                                                      |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `libshapeme::shapes`    | Utility helpers: `random_oklab_color`, `nudge_oklab`, `rand_between`, `clamp_coord`, shape-kind selection                           |
 | `libshapeme::gene`      | `Gene` trait; `TriangleGene`, `CircleGene`, `PolygonGene` structs; `ShapeGene` enum; `BlurGene`, `BackgroundGene`, `MutationConfig` |
-| `libshapeme::genome`    | `Genome` trait, `ShapeGenome` (fitness/mutate/recombine); replaces the old `ShapeSet`            |
-| `libshapeme::render`    | Framebuffer rasterisation, `draw_genes`, `apply_blur`, `compute_diff`, `scale_image`             |
-| `libshapeme::annealing` | `AnnealingState` only (mutation logic lives in `ShapeGenome::mutate`)                            |
-| `libshapeme::oklab`     | sRGB↔OKlab conversion (`srgb_u8_to_oklab`, `oklab_to_srgb_u8`, bulk variants)                   |
-| `libshapeme::svg`       | `build_svg(&[ShapeGene], ...)`, `build_svg_from_genome`, `svg_to_data_url` (no file writes)     |
-| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O                |
+| `libshapeme::genome`    | `Genome` trait, `ShapeGenome` (fitness/mutate/recombine); replaces the old `ShapeSet`                                               |
+| `libshapeme::render`    | Framebuffer rasterisation, `draw_genes`, `apply_blur`, `compute_diff`, `scale_image`                                                |
+| `libshapeme::annealing` | `AnnealingState` only (mutation logic lives in `ShapeGenome::mutate`)                                                               |
+| `libshapeme::oklab`     | sRGB↔OKlab conversion (`srgb_u8_to_oklab`, `oklab_to_srgb_u8`, bulk variants)                                                      |
+| `libshapeme::svg`       | `build_svg(&[ShapeGene], ...)`, `build_svg_from_genome`, `svg_to_data_url` (no file writes)                                         |
+| `shapeme::main`         | CLI (clap `setup`/`process`), SDL2 init and event loop, file I/O, checkpoint I/O                                                    |
 
 ## Key design decisions
 
@@ -58,6 +58,7 @@ colour-diverged halves) and `angle_crossover()` (recombine two polygons at a ran
 dividing angle). These are inherent methods on `PolygonGene`, not free functions.
 
 `ShapeGene` helpers:
+
 - `z_order() -> u16` / `set_z_order(u16)` — z-order access without destructuring
 - `cost() -> usize` — budget accounting
 - `random(rng, config) -> Self` — random gene of any enabled type
