@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::annealing::AnnealingState;
 use crate::gene::{BackgroundGene, BlurGene, Gene, MutationConfig, ShapeGene};
 use crate::render::{apply_blur, compute_diff, draw_genes};
+use crate::svg::build_svg_from_genome;
 
 /// A complete candidate solution produced by combining genes.
 pub trait Genome: Clone + Send + Sync {
@@ -32,6 +33,36 @@ pub trait Genome: Clone + Send + Sync {
     /// Produce an offspring genome from `self` and `other`.
     #[must_use]
     fn recombine(&self, other: &Self, rng: &mut impl Rng) -> Self;
+
+    /// Render the unblurred genome into `fb` (`OKlab`, 3 floats/pixel).
+    ///
+    /// Does not apply blur — callers that need the blurred result call `blur_radius()` and
+    /// then `apply_blur` on the result.  Separating geometry from blur lets fitness,
+    /// SDL display, and checkpoint SVG all share one rendering path.
+    fn render_to_fb(&self, fb: &mut [f32], width: u32, height: u32);
+
+    /// Build an SVG string representing this genome.
+    #[must_use]
+    fn build_svg_output(&self, width: u32, height: u32, compact: bool) -> String;
+
+    /// Optional evolved Gaussian blur radius (sigma in pixels).
+    #[must_use]
+    fn blur_radius(&self) -> Option<f32>;
+
+    /// Approximate serialised byte cost of this genome.  Used by the budget ramp;
+    /// genomes that do not use the cost model return 0.
+    #[must_use]
+    fn total_cost(&self) -> usize {
+        0
+    }
+
+    /// Trim the genome so its compact SVG data URL fits within `max_bytes`.
+    ///
+    /// Genome types that do not support per-byte budgets return `self` unchanged.
+    #[must_use]
+    fn trim_to_budget(self, _width: u32, _height: u32, _max_bytes: usize) -> Self {
+        self
+    }
 }
 
 /// A candidate solution: a non-empty list of `ShapeGene`s plus an optional blur and a background.
@@ -57,22 +88,10 @@ impl ShapeGenome {
         genes
     }
 
-    /// The blur radius, if any.
-    #[must_use]
-    pub fn blur_radius(&self) -> Option<f32> {
-        self.blur.as_ref().map(|b| b.radius)
-    }
-
     /// Background colour in `OKlab` [L, a, b].
     #[must_use]
     pub fn background_oklab(&self) -> [f32; 3] {
         self.background.oklab
-    }
-
-    /// Total approximate byte cost of all shape genes in this genome.
-    #[must_use]
-    pub fn total_cost(&self) -> usize {
-        self.shapes.iter().map(ShapeGene::cost).sum()
     }
 }
 
@@ -153,12 +172,65 @@ impl ShapeGenome {
 }
 
 impl Genome for ShapeGenome {
-    fn fitness(&self, target: &[f32], width: u32, height: u32, scratch: &mut Vec<f32>) -> f32 {
+    fn render_to_fb(&self, fb: &mut [f32], width: u32, height: u32) {
         let bg = self.background_oklab();
-        for pixel in scratch.chunks_exact_mut(3) {
+        for pixel in fb.chunks_exact_mut(3) {
             pixel.copy_from_slice(&bg);
         }
-        draw_genes(scratch, width, height, &self.shapes);
+        draw_genes(fb, width, height, &self.shapes);
+    }
+
+    fn build_svg_output(&self, width: u32, height: u32, compact: bool) -> String {
+        build_svg_from_genome(self, width, height, compact)
+    }
+
+    fn blur_radius(&self) -> Option<f32> {
+        self.blur.as_ref().map(|b| b.radius)
+    }
+
+    fn total_cost(&self) -> usize {
+        self.shapes.iter().map(ShapeGene::cost).sum()
+    }
+
+    fn trim_to_budget(self, width: u32, height: u32, max_bytes: usize) -> Self {
+        use crate::svg::{build_svg, svg_to_data_url};
+
+        let mut shapes = self.shapes;
+        shapes.sort_unstable_by_key(ShapeGene::z_order);
+        let mut blur = self.blur;
+        let background = self.background;
+
+        loop {
+            let svg = build_svg(
+                &shapes,
+                width,
+                height,
+                blur.as_ref().map(|b| b.radius),
+                background.oklab,
+                true,
+            );
+            if svg_to_data_url(&svg).len() <= max_bytes || shapes.is_empty() {
+                break;
+            }
+            if blur.is_some() {
+                let svg_no_blur = build_svg(&shapes, width, height, None, background.oklab, true);
+                if svg_to_data_url(&svg_no_blur).len() <= max_bytes {
+                    blur = None;
+                    break;
+                }
+            }
+            shapes.pop();
+        }
+
+        Self {
+            shapes,
+            blur,
+            background,
+        }
+    }
+
+    fn fitness(&self, target: &[f32], width: u32, height: u32, scratch: &mut Vec<f32>) -> f32 {
+        self.render_to_fb(scratch, width, height);
         let blurred_opt = self
             .blur_radius()
             .map(|r| apply_blur(scratch, width, height, r));

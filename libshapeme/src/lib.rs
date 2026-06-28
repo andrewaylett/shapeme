@@ -10,6 +10,8 @@ pub mod annealing;
 pub mod gene;
 /// Genome-level traits and types (`ShapeGenome`, `Genome` trait).
 pub mod genome;
+/// Grid genome: shared-vertex quad-mesh covering the canvas.
+pub mod grid;
 /// OKlab perceptually uniform colour space conversions.
 pub mod oklab;
 /// Framebuffer rasterisation, blur, and diff computation.

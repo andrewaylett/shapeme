@@ -1,7 +1,8 @@
 use std::fmt::Write as _;
 
 use crate::gene::{CircleGene, PolygonGene, ShapeGene, TriangleGene};
-use crate::genome::ShapeGenome;
+use crate::genome::{Genome, ShapeGenome};
+use crate::grid::GridGenome;
 use crate::oklab;
 
 /// Build an SVG string representing the given shape genes.
@@ -212,6 +213,99 @@ pub fn build_svg_from_genome(
         genome.background_oklab(),
         compact,
     )
+}
+
+/// Build an SVG string from a `GridGenome`.
+///
+/// Each grid cell is rendered as a `<polygon>` with four vertices (TL, TR, BR, BL).
+/// Cells are fully opaque — no `fill-opacity` attribute.
+/// If the genome has blur, wraps all content in a `<feGaussianBlur>` filter.
+#[must_use]
+pub fn build_svg_from_grid(grid: &GridGenome, width: u32, height: u32, compact: bool) -> String {
+    let mut s = String::new();
+
+    if compact {
+        write!(
+            s,
+            "<svg xmlns='http://www.w3.org/2000/svg' \
+             viewBox='0 0 {width} {height}' \
+             preserveAspectRatio='xMidYMid slice'>"
+        )
+        .expect("String write is infallible");
+        if let Some(r) = grid.blur_radius() {
+            write!(
+                s,
+                "<defs><filter id='b'>\
+                 <feGaussianBlur stdDeviation='{r}'/>\
+                 </filter></defs>\
+                 <g filter='url(#b)'>"
+            )
+            .expect("String write is infallible");
+        }
+        for row in 0..grid.rows as usize {
+            for col in 0..grid.cols as usize {
+                push_grid_cell(&mut s, grid, row, col, true);
+            }
+        }
+        if grid.blur_radius().is_some() {
+            s.push_str("</g>");
+        }
+        s.push_str("</svg>");
+    } else {
+        s.push_str("<?xml version=\"1.0\" standalone=\"no\"?>\n");
+        s.push_str("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" ");
+        s.push_str("\"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n");
+        writeln!(
+            s,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+             viewBox=\"0 0 {width} {height}\" \
+             preserveAspectRatio=\"xMidYMid slice\" \
+             version=\"1.1\">"
+        )
+        .expect("String write is infallible");
+        if let Some(r) = grid.blur_radius() {
+            writeln!(
+                s,
+                "<defs><filter id=\"b\">\
+                 <feGaussianBlur stdDeviation=\"{r}\"/>\
+                 </filter></defs>"
+            )
+            .expect("String write is infallible");
+            writeln!(s, "<g filter=\"url(#b)\">").expect("String write is infallible");
+        }
+        for row in 0..grid.rows as usize {
+            for col in 0..grid.cols as usize {
+                push_grid_cell(&mut s, grid, row, col, false);
+            }
+        }
+        if grid.blur_radius().is_some() {
+            s.push_str("</g>\n");
+        }
+        s.push_str("</svg>\n");
+    }
+
+    s
+}
+
+fn push_grid_cell(s: &mut String, grid: &GridGenome, row: usize, col: usize, compact: bool) {
+    let cols_p1 = grid.cols as usize + 1;
+    let tl = grid.points[row * cols_p1 + col];
+    let tr = grid.points[row * cols_p1 + col + 1];
+    let br = grid.points[(row + 1) * cols_p1 + col + 1];
+    let bl = grid.points[(row + 1) * cols_p1 + col];
+    let color = grid.colors[row * grid.cols as usize + col];
+    let [r, g, b] = oklab::oklab_to_srgb_u8(color);
+    let pts = format!(
+        "{},{} {},{} {},{} {},{}",
+        tl.0, tl.1, tr.0, tr.1, br.0, br.1, bl.0, bl.1
+    );
+    if compact {
+        write!(s, "<polygon points='{pts}' fill='#{r:02x}{g:02x}{b:02x}'/>")
+            .expect("String write is infallible");
+    } else {
+        writeln!(s, "<polygon points=\"{pts}\" fill=\"#{r:02x}{g:02x}{b:02x}\"/>")
+            .expect("String write is infallible");
+    }
 }
 
 /// Percent-encode a compact SVG string for use as a `data:image/svg+xml,` URL.

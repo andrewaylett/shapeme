@@ -237,3 +237,39 @@ rasterising, so layering is independent of `Vec` insertion order. This makes rec
 crossover safe: two parents with different gene orderings produce a child that renders consistently.
 `ShapeGenome::mutate` has a ~5% chance to swap two genes' z-orders (reordering), and `ShapeGene::mutate`
 has a ~10% chance to nudge its own z_order by ±1000.
+
+### Grid genome (`--start grid`)
+
+`GridGenome` in `libshapeme/src/grid.rs` is a shared-vertex quad mesh covering the entire canvas.
+It is a separate genome type from `ShapeGenome` because:
+
+- Adjacent cells share control points; moving one point reshapes multiple cells simultaneously.
+- There is no cost budget or incremental ramp — the grid size is fixed at setup time.
+- Recombination swaps full point or colour arrays (no z-ordering, no polygon splitting).
+
+`GridGenome` stores `(cols+1) × (rows+1)` control points and `cols × rows` OKlab colours.
+Each cell is rendered as two triangles (TL-TR-BR, TL-BR-BL) via `draw_triangle` (made `pub(crate)`)
+to guarantee gap-free coverage even when points are deformed by mutation.
+
+**Point constraints (enforced in `normalize`)**: corners are **pinned** to `±margin`, edge points
+have one axis pinned and one clamped, interior points are clamped on both axes. "Pinned" means
+assignment to the exact boundary — not clamping — so that when blur (and thus `margin`) grows,
+edge points move outward and the canvas remains fully covered.
+
+**Blur and margin coupling**: `blur_radius = min(cell_w, cell_h) / 2` at setup. If blur evolves,
+`normalize` re-pins edge points to the updated margin so the canvas stays covered. This is the
+same margin semantics used by `ShapeGene` coordinates.
+
+**No cost budget**: `AnnealingState::new(usize::MAX / 2, usize::MAX / 2)` is used so the
+incremental cost ramp never triggers. `GridGenome::total_cost()` returns the cell count (for
+display logging), not a byte budget.
+
+**Checkpoint format**: `CheckpointGenome` is now an enum (`Shape(ShapeGenome)` | `Grid(GridGenome)`),
+stored in `Checkpoint.genome`. `StoredConfig.use_grid: bool` signals which variant `--restart`
+should reconstruct. Old checkpoints decode with the "re-run `shapeme setup`" message as before.
+
+**`Genome` trait extension**: `render_to_fb`, `build_svg_output`, `blur_radius`, `total_cost`
+(default 0), and `trim_to_budget` (default identity) were added to the trait. `ShapeGenome`
+provides concrete impls; `GridGenome` overrides all except `trim_to_budget`. The generic
+`run_process_loop` and `run_batch` functions use these trait methods so both genome types share
+the same annealing loop.

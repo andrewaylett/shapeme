@@ -73,7 +73,7 @@ fn draw_circle(
     clippy::too_many_arguments,
     reason = "pixel coordinate + colour + alpha parameters are unavoidable in a rasterizer"
 )]
-fn draw_triangle(
+pub(crate) fn draw_triangle(
     fb: &mut [f32],
     width: u32,
     height: u32,

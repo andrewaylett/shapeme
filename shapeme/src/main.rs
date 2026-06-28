@@ -25,9 +25,10 @@ use libshapeme::gene::{
     POLYGON_VERTEX_COST, ShapeGene, TRIANGLE_COST,
 };
 use libshapeme::genome::{Genome, ShapeGenome};
+use libshapeme::grid::GridGenome;
 use libshapeme::oklab;
-use libshapeme::render::{apply_blur, draw_genes, scale_image};
-use libshapeme::svg::{build_svg, build_svg_from_genome, svg_to_data_url};
+use libshapeme::render::{apply_blur, scale_image};
+use libshapeme::svg::{build_svg, svg_to_data_url};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -61,6 +62,8 @@ enum StartMode {
     Blank,
     /// Neutral-grey circle grid sized to fill the --max-shapes budget (and trimmed to --max-bytes if set); radius and blur set to half the inter-centre spacing.
     Circles,
+    /// Shared-vertex quad mesh (`GridGenome`) covering the canvas; cell count from --max-shapes.
+    Grid,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -135,6 +138,10 @@ struct ProcessArgs {
 /// Configuration embedded in the checkpoint by `setup`. Carries everything `process` needs
 /// to reconstruct the run without any additional CLI flags.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flags directly mirror CLI arguments; a state machine would obscure the one-to-one correspondence"
+)]
 struct StoredConfig {
     /// Scaled `OKlab` pixel data (width × height × 3 f32 values).
     image: Vec<f32>,
@@ -143,6 +150,8 @@ struct StoredConfig {
     use_triangles: bool,
     use_circles: bool,
     use_polygons: bool,
+    /// True when a `GridGenome` is stored rather than a `ShapeGenome`.
+    use_grid: bool,
     mutation_rate: u32,
     max_bytes: Option<usize>,
     /// Default SVG output path; `process --output-svg` overrides this.
@@ -153,12 +162,19 @@ struct StoredConfig {
     initial_blur_radius: Option<f32>,
 }
 
-/// Current checkpoint format: stores a full `ShapeGenome`.
+/// Genome variant stored in the checkpoint.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum CheckpointGenome {
+    Shape(ShapeGenome),
+    Grid(GridGenome),
+}
+
+/// Current checkpoint format.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Checkpoint {
     config: StoredConfig,
     state: AnnealingState,
-    genome: ShapeGenome,
+    genome: CheckpointGenome,
 }
 
 /// Load an image (any format supported by the image crate) and return it as an
@@ -182,12 +198,15 @@ fn save_binary(
     path: &Path,
     config: &StoredConfig,
     state: &AnnealingState,
-    genome: &ShapeGenome,
+    genome: &CheckpointGenome,
 ) -> Result<()> {
     let checkpoint = Checkpoint {
         config: config.clone(),
         state: state.clone(),
-        genome: genome.clone(),
+        genome: match genome {
+            CheckpointGenome::Shape(g) => CheckpointGenome::Shape(g.clone()),
+            CheckpointGenome::Grid(g) => CheckpointGenome::Grid(g.clone()),
+        },
     };
     let encoded = bincode::serde::encode_to_vec(&checkpoint, bincode::config::standard())
         .context("failed to encode checkpoint")?;
@@ -198,7 +217,7 @@ fn save_binary(
 /// Load a binary checkpoint. Returns `None` if the file does not exist (fresh start).
 ///
 /// Fails with a clear message on corrupt or incompatible data.
-fn load_binary(path: &Path) -> Result<Option<(StoredConfig, AnnealingState, ShapeGenome)>> {
+fn load_binary(path: &Path) -> Result<Option<(StoredConfig, AnnealingState, CheckpointGenome)>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -256,27 +275,35 @@ fn init_sdl(width: u32, height: u32) -> Result<SdlCtx> {
     })
 }
 
-fn finalize(
+fn finalize_generic<G: Genome>(
     checkpoint: &Path,
     config: &StoredConfig,
     output_svg: &Path,
-    genome: &ShapeGenome,
+    genome: &G,
     state: &AnnealingState,
     print_data_url: bool,
+    make_checkpoint_genome: impl Fn(&G) -> CheckpointGenome,
 ) -> Result<()> {
     write_svg(
         output_svg,
-        &build_svg_from_genome(genome, config.width, config.height, false),
+        &genome.build_svg_output(config.width, config.height, false),
     )?;
-    save_binary(checkpoint, config, state, genome)?;
+    let cg = make_checkpoint_genome(genome);
+    save_binary(checkpoint, config, state, &cg)?;
     if print_data_url {
-        let compact = build_svg_from_genome(genome, config.width, config.height, true);
+        let compact = genome.build_svg_output(config.width, config.height, true);
         println!("{}", svg_to_data_url(&compact));
     }
     Ok(())
 }
 
+#[allow(
+    clippy::option_if_let_else,
+    reason = "binary-search closure inside the else branch is more readable than map_or for long-form logic"
+)]
 fn setup(args: &SetupArgs) -> Result<()> {
+    let is_grid = matches!(args.start, StartMode::Grid);
+
     let use_triangles = args.use_triangles != 0;
     // --start circles forces circles on even if --use-circles was not set
     let use_circles = if matches!(args.start, StartMode::Circles) {
@@ -288,7 +315,9 @@ fn setup(args: &SetupArgs) -> Result<()> {
         args.use_circles != 0
     };
     let use_polygons = args.use_polygons != 0;
-    if !use_triangles && !use_circles && !use_polygons {
+
+    // Grid mode bypasses the shape-type requirement
+    if !is_grid && !use_triangles && !use_circles && !use_polygons {
         anyhow::bail!(
             "at least one of --use-triangles, --use-circles, or --use-polygons must be non-zero"
         );
@@ -306,19 +335,23 @@ fn setup(args: &SetupArgs) -> Result<()> {
     let image = oklab::image_srgb_to_oklab(&scaled_pixels);
     tracing::info!(width, height, "image loaded");
 
-    // Build the initial genome before StoredConfig so that circle-grid mode can set
-    // initial_shapes to the actual circle count, giving process --restart a comparable budget.
-    let initial_genome = match args.start {
-        StartMode::Blank => ShapeGenome {
-            shapes: vec![],
-            blur: None,
-            background: BackgroundGene::default(),
-        },
+    let (initial_genome, state, config_initial_shapes) = match args.start {
+        StartMode::Blank => {
+            let genome = CheckpointGenome::Shape(ShapeGenome {
+                shapes: vec![],
+                blur: None,
+                background: BackgroundGene::default(),
+            });
+            let mut state =
+                AnnealingState::new(args.max_shapes * TRIANGLE_COST, args.initial_shapes * TRIANGLE_COST);
+            state.blur_radius = args.blur_radius;
+            (genome, state, args.initial_shapes)
+        }
+
         StartMode::Circles => {
             let grey = [0.5f32, 0.0, 0.0];
             let n_shapes = (args.max_shapes * TRIANGLE_COST / CIRCLE_COST).max(1);
 
-            // Grid geometry for a given circle count
             let grid_geom = |n: usize| -> (usize, usize, f64, f64, i16, f32) {
                 let aspect = width as f64 / height as f64;
                 let cols = ((n as f64 * aspect).sqrt().floor() as usize).max(1);
@@ -331,7 +364,6 @@ fn setup(args: &SetupArgs) -> Result<()> {
                 (cols, rows, cell_w, cell_h, radius, blur_r)
             };
 
-            // If max_bytes is set, binary-search for the largest n whose SVG fits
             let n = if let Some(max_bytes) = args.max_bytes {
                 let fits = |n: usize| -> bool {
                     let (cols, rows, cell_w, cell_h, radius, blur_r) = grid_geom(n);
@@ -360,8 +392,12 @@ fn setup(args: &SetupArgs) -> Result<()> {
                     let mut lo = 1usize;
                     let mut hi = n_shapes;
                     while lo < hi {
-                        let mid = (lo + hi + 1) / 2;
-                        if fits(mid) { lo = mid; } else { hi = mid - 1; }
+                        let mid = (lo + hi).div_ceil(2);
+                        if fits(mid) {
+                            lo = mid;
+                        } else {
+                            hi = mid - 1;
+                        }
                     }
                     lo
                 }
@@ -387,120 +423,133 @@ fn setup(args: &SetupArgs) -> Result<()> {
                     z += 1;
                 }
             }
-            tracing::info!(count = shapes.len(), cols, rows, radius, blur = blur_r, "circle grid initialised");
-            ShapeGenome {
+            let shape_count = shapes.len();
+            tracing::info!(count = shape_count, cols, rows, radius, blur = blur_r, "circle grid initialised");
+            let genome = ShapeGenome {
                 shapes,
                 blur: Some(BlurGene { radius: blur_r }),
                 background: BackgroundGene { oklab: grey },
-            }
+            };
+            let mut state =
+                AnnealingState::new(args.max_shapes * TRIANGLE_COST, shape_count * TRIANGLE_COST);
+            state.blur_radius = Some(blur_r);
+            (CheckpointGenome::Shape(genome), state, shape_count)
+        }
+
+        StartMode::Grid => {
+            let n = args.max_shapes;
+            let aspect = width as f64 / height as f64;
+
+            // Binary-search for largest grid whose compact SVG data URL fits max_bytes
+            let make_grid = |n: usize| -> GridGenome {
+                let cols = ((n as f64 * aspect).sqrt().round() as usize).max(1);
+                let rows = (n / cols).max(1);
+                let cell_w = width as f64 / cols as f64;
+                let cell_h = height as f64 / rows as f64;
+                let blur_r = (cell_w.min(cell_h) / 2.0) as f32;
+                GridGenome::new(cols as u16, rows as u16, width, height, Some(blur_r))
+            };
+
+            let final_grid = if let Some(max_bytes) = args.max_bytes {
+                let fits = |n: usize| -> bool {
+                    let g = make_grid(n);
+                    let svg = g.build_svg_output(width, height, true);
+                    svg_to_data_url(&svg).len() <= max_bytes
+                };
+                if fits(n) {
+                    make_grid(n)
+                } else {
+                    let mut lo = 1usize;
+                    let mut hi = n;
+                    while lo < hi {
+                        let mid = (lo + hi).div_ceil(2);
+                        if fits(mid) {
+                            lo = mid;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    make_grid(lo)
+                }
+            } else {
+                make_grid(n)
+            };
+
+            let cell_count = final_grid.cols as usize * final_grid.rows as usize;
+            let blur_r = final_grid.blur_radius();
+            tracing::info!(
+                cols = final_grid.cols,
+                rows = final_grid.rows,
+                cells = cell_count,
+                blur = ?blur_r,
+                "grid genome initialised"
+            );
+            let state = AnnealingState::new(usize::MAX / 2, usize::MAX / 2);
+            (CheckpointGenome::Grid(final_grid), state, cell_count)
         }
     };
 
-    let initial_shapes = match args.start {
-        StartMode::Circles => initial_genome.shapes.len(),
-        StartMode::Blank => args.initial_shapes,
+    let max_shapes = match &initial_genome {
+        CheckpointGenome::Shape(_) => args.max_shapes.max(config_initial_shapes),
+        CheckpointGenome::Grid(_) => config_initial_shapes,
     };
-    let max_shapes = args.max_shapes.max(initial_shapes);
 
     let config = StoredConfig {
         image,
         width,
         height,
-        use_triangles,
-        use_circles,
-        use_polygons,
+        use_triangles: !is_grid && use_triangles,
+        use_circles: !is_grid && use_circles,
+        use_polygons: !is_grid && use_polygons,
+        use_grid: is_grid,
         mutation_rate: args.mutation_rate,
         max_bytes: args.max_bytes,
         output_svg: args.output_svg.clone(),
         max_shapes,
-        initial_shapes,
+        initial_shapes: config_initial_shapes,
         initial_blur_radius: args.blur_radius,
     };
-
-    let mut state = AnnealingState::new(max_shapes * TRIANGLE_COST, initial_shapes * TRIANGLE_COST);
-    state.blur_radius = args.blur_radius;
 
     save_binary(&args.checkpoint, &config, &state, &initial_genome)?;
     tracing::info!(path = %args.checkpoint.display(), "checkpoint written");
     Ok(())
 }
 
+/// Rendered update from a batch worker, ready for SDL display.
 struct DisplayUpdate {
-    shapes: Vec<ShapeGene>,
-    blur: Option<f32>,
-    background: [f32; 3],
+    /// Blurred `OKlab` framebuffer, ready for SDL display.
+    rendered_fb: Vec<f32>,
     diff: f32,
+    /// Number of cells or shapes (for logging).
+    shape_count: usize,
     max_cost_incremental: usize,
     generation: i64,
     temperature: f32,
+    blur: Option<f32>,
 }
 
 /// Result of a single parallel annealing batch.
-struct BatchResult {
+struct BatchResult<G> {
     /// All-time best genome seen during this batch.
-    best_genome: ShapeGenome,
+    best_genome: G,
     /// Full annealing state at batch end; `absbestdiff` is the lowest diff seen.
     state: AnnealingState,
-}
-
-/// Trim a genome so that its compact SVG data URL fits within `max_bytes`.
-///
-/// Shapes are sorted by z-order; the topmost (highest z) shape is removed first.
-/// Blur is stripped before shapes, since removing the global filter is cheaper visually.
-fn trim_genome_to_budget(
-    genome: ShapeGenome,
-    width: u32,
-    height: u32,
-    max_bytes: usize,
-) -> ShapeGenome {
-    let mut shapes = genome.shapes;
-    shapes.sort_unstable_by_key(ShapeGene::z_order);
-    let mut blur = genome.blur;
-    let background = genome.background;
-
-    loop {
-        let svg = build_svg(
-            &shapes,
-            width,
-            height,
-            blur.as_ref().map(|b| b.radius),
-            background.oklab,
-            true,
-        );
-        if svg_to_data_url(&svg).len() <= max_bytes || shapes.is_empty() {
-            break;
-        }
-        // Try dropping blur alone before removing a shape
-        if blur.is_some() {
-            let svg_no_blur = build_svg(&shapes, width, height, None, background.oklab, true);
-            if svg_to_data_url(&svg_no_blur).len() <= max_bytes {
-                blur = None;
-                break;
-            }
-        }
-        // Remove the topmost (highest z-order) shape — shapes is sorted ascending
-        shapes.pop();
-    }
-
-    ShapeGenome {
-        shapes,
-        blur,
-        background,
-    }
 }
 
 #[allow(
     clippy::too_many_arguments,
     reason = "batch parameters, config reference, starting state, and progress channel are all necessary"
 )]
-fn run_batch(
+fn run_batch<G: Genome>(
     config: &StoredConfig,
-    start_genome: &ShapeGenome,
+    start_genome: &G,
     start_state: &AnnealingState,
+    mutation_config: &MutationConfig,
+    min_addable_cost: usize,
     batch_size: u32,
     reheated: bool,
     tx: &mpsc::Sender<DisplayUpdate>,
-) -> BatchResult {
+) -> BatchResult<G> {
     let mut rng = SmallRng::from_os_rng();
     let mut fb = vec![0.0f32; (config.width * config.height * 3) as usize];
 
@@ -511,28 +560,6 @@ fn run_batch(
 
     let width = config.width;
     let height = config.height;
-    let mutation_config = MutationConfig {
-        width,
-        height,
-        margin: start_genome.blur_radius().map_or(0, |r| r.ceil() as i16),
-        mutation_rate: config.mutation_rate.min(1000),
-        use_triangles: config.use_triangles,
-        use_circles: config.use_circles,
-        use_polygons: config.use_polygons,
-        max_polygon_vertices: config.max_shapes * 4,
-    };
-
-    let min_addable_cost = [
-        mutation_config.use_triangles.then_some(TRIANGLE_COST),
-        mutation_config.use_circles.then_some(CIRCLE_COST),
-        mutation_config
-            .use_polygons
-            .then_some(POLYGON_BASE_COST + 3 * POLYGON_VERTEX_COST),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
-    .unwrap_or(TRIANGLE_COST);
 
     let mut best_genome = start_genome.clone();
     let mut absbest_genome = start_genome.clone();
@@ -548,6 +575,7 @@ fn run_batch(
             }
         }
 
+        // Incremental cost ramp (only meaningful for ShapeGenome; grid uses usize::MAX/2 limits)
         if state.generation % 1000 == 0
             && state.max_cost_incremental < state.max_cost
             && best_genome.total_cost() + min_addable_cost > state.max_cost_incremental
@@ -555,10 +583,10 @@ fn run_batch(
             state.max_cost_incremental += min_addable_cost;
         }
 
-        let candidate = best_genome.mutate(&mut rng, &state, &mutation_config);
+        let candidate = best_genome.mutate(&mut rng, &state, mutation_config);
 
         let effective = if let Some(max_bytes) = config.max_bytes {
-            trim_genome_to_budget(candidate, width, height, max_bytes)
+            candidate.trim_to_budget(width, height, max_bytes)
         } else {
             candidate
         };
@@ -575,14 +603,20 @@ fn run_batch(
                 absbest_genome = effective.clone();
                 state.absbestdiff = percdiff;
                 state.blur_radius = effective.blur_radius();
+
+                // Render the new best for display (geometry + blur)
+                effective.render_to_fb(&mut fb, width, height);
+                let blurred = effective.blur_radius().map(|r| apply_blur(&fb, width, height, r));
+                let display_fb = blurred.unwrap_or_else(|| fb.clone());
+
                 let _ = tx.send(DisplayUpdate {
-                    shapes: effective.shapes.clone(),
-                    blur: effective.blur_radius(),
-                    background: effective.background_oklab(),
+                    rendered_fb: display_fb,
                     diff: percdiff,
+                    shape_count: effective.total_cost(),
                     max_cost_incremental: state.max_cost_incremental,
                     generation: state.generation,
                     temperature: state.temperature,
+                    blur: effective.blur_radius(),
                 });
             }
             best_genome = effective;
@@ -599,7 +633,7 @@ fn run_batch(
 fn process(args: &ProcessArgs) -> Result<()> {
     let checkpoint_path = &args.checkpoint;
 
-    let Some((config, mut state, saved_genome)) = load_binary(checkpoint_path)? else {
+    let Some((config, state, genome)) = load_binary(checkpoint_path)? else {
         anyhow::bail!(
             "checkpoint {} not found — run `shapeme setup` to create one",
             checkpoint_path.display()
@@ -609,19 +643,25 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
     let output_svg: &Path = args.output_svg.as_deref().unwrap_or(&config.output_svg);
 
+    match genome {
+        CheckpointGenome::Shape(g) => run_process_shape(args, &config, state, g, output_svg),
+        CheckpointGenome::Grid(g) => run_process_grid(args, &config, state, g, output_svg),
+    }
+}
+
+fn run_process_shape(
+    args: &ProcessArgs,
+    config: &Arc<StoredConfig>,
+    mut state: AnnealingState,
+    saved_genome: ShapeGenome,
+    output_svg: &Path,
+) -> Result<()> {
     let use_triangles = config.use_triangles;
     let use_circles = config.use_circles;
     let use_polygons = config.use_polygons;
     let width = config.width;
     let height = config.height;
 
-    let mut sdl_ctx: Option<SdlCtx> = if args.headless {
-        None
-    } else {
-        Some(init_sdl(width, height)?)
-    };
-
-    // Determine starting genome: fresh start if restarting or no saved shapes yet
     let init_genome = if args.restart || saved_genome.shapes.is_empty() {
         let mut rng = SmallRng::from_os_rng();
         let margin = config.initial_blur_radius.map_or(0, |r| r.ceil() as i16);
@@ -656,14 +696,126 @@ fn process(args: &ProcessArgs) -> Result<()> {
     }
     state.blur_radius = init_genome.blur_radius();
 
+    let mutation_config = MutationConfig {
+        width,
+        height,
+        margin: init_genome.blur_radius().map_or(0, |r| r.ceil() as i16),
+        mutation_rate: config.mutation_rate.min(1000),
+        use_triangles,
+        use_circles,
+        use_polygons,
+        max_polygon_vertices: config.max_shapes * 4,
+    };
+
+    let min_addable_cost = [
+        mutation_config.use_triangles.then_some(TRIANGLE_COST),
+        mutation_config.use_circles.then_some(CIRCLE_COST),
+        mutation_config
+            .use_polygons
+            .then_some(POLYGON_BASE_COST + 3 * POLYGON_VERTEX_COST),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(TRIANGLE_COST);
+
+    let rc = mutation_config.clone();
+    run_process_loop(
+        args,
+        config,
+        state,
+        init_genome,
+        output_svg,
+        &mutation_config,
+        min_addable_cost,
+        |g| CheckpointGenome::Shape(g.clone()),
+        move |g: &ShapeGenome, rng, other: &ShapeGenome| g.recombine_configured(other, rng, &rc),
+    )
+}
+
+fn run_process_grid(
+    args: &ProcessArgs,
+    config: &Arc<StoredConfig>,
+    mut state: AnnealingState,
+    saved_genome: GridGenome,
+    output_svg: &Path,
+) -> Result<()> {
+    let width = config.width;
+    let height = config.height;
+
+    let init_genome = if args.restart {
+        let cols = saved_genome.cols;
+        let rows = saved_genome.rows;
+        let blur_r = config.initial_blur_radius;
+        GridGenome::new(cols, rows, width, height, blur_r)
+    } else {
+        saved_genome
+    };
+
+    if args.restart {
+        state = AnnealingState::new(usize::MAX / 2, usize::MAX / 2);
+    }
+    state.blur_radius = init_genome.blur_radius();
+
+    let margin = init_genome.blur_radius().map_or(0, |r| r.ceil() as i16);
+    let mutation_config = MutationConfig {
+        width,
+        height,
+        margin,
+        mutation_rate: config.mutation_rate.min(1000),
+        use_triangles: false,
+        use_circles: false,
+        use_polygons: false,
+        max_polygon_vertices: 0,
+    };
+
+    run_process_loop(
+        args,
+        config,
+        state,
+        init_genome,
+        output_svg,
+        &mutation_config,
+        0, // no cost ramp for grid
+        |g| CheckpointGenome::Grid(g.clone()),
+        |g: &GridGenome, rng, other: &GridGenome| g.recombine(other, rng),
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "process loop needs all these parameters; factoring into a struct adds boilerplate without clarity"
+)]
+fn run_process_loop<G, MakeCG, Recombine>(
+    args: &ProcessArgs,
+    config: &Arc<StoredConfig>,
+    mut state: AnnealingState,
+    init_genome: G,
+    output_svg: &Path,
+    mutation_config: &MutationConfig,
+    min_addable_cost: usize,
+    make_checkpoint_genome: MakeCG,
+    recombine_fn: Recombine,
+) -> Result<()>
+where
+    G: Genome + 'static,
+    MakeCG: Fn(&G) -> CheckpointGenome,
+    Recombine: Fn(&G, &mut SmallRng, &G) -> G,
+{
+    let checkpoint_path = &args.checkpoint;
+    let width = config.width;
+    let height = config.height;
+
+    let mut sdl_ctx: Option<SdlCtx> = if args.headless {
+        None
+    } else {
+        Some(init_sdl(width, height)?)
+    };
+
     let mut absbest_genome = init_genome;
 
     let mut fb = vec![0.0f32; (width * height * 3) as usize];
-    let bg = absbest_genome.background_oklab();
-    for pixel in fb.chunks_exact_mut(3) {
-        pixel.copy_from_slice(&bg);
-    }
-    draw_genes(&mut fb, width, height, &absbest_genome.shapes);
+    absbest_genome.render_to_fb(&mut fb, width, height);
 
     let mut show_original = false;
     let mut last_display_buf: Vec<f32> = absbest_genome
@@ -671,11 +823,7 @@ fn process(args: &ProcessArgs) -> Result<()> {
         .map_or_else(|| fb.clone(), |r| apply_blur(&fb, width, height, r));
 
     if let Some(ctx) = &mut sdl_ctx {
-        let blurred = absbest_genome
-            .blur_radius()
-            .map(|r| apply_blur(&fb, width, height, r));
-        let display = blurred.as_deref().unwrap_or(&fb);
-        let display_rgb = oklab::image_oklab_to_srgb(display);
+        let display_rgb = oklab::image_oklab_to_srgb(&last_display_buf);
         let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
         let _ = ctx.canvas.copy(&ctx.texture, None, None);
         ctx.canvas.present();
@@ -689,7 +837,6 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
     let print_data_url = args.data_url || args.headless;
     let top_k_n = args.top_k.max(1);
-
     let mut rng = SmallRng::from_os_rng();
 
     loop {
@@ -699,7 +846,8 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
         let batch_size = args.batch_size;
         let (tx, rx) = mpsc::channel::<DisplayUpdate>();
-        let config_arc = Arc::clone(&config);
+        let config_arc = Arc::clone(config);
+        let mc = mutation_config.clone(); // clone to move into thread
         let join_handle = std::thread::spawn(move || {
             (0..n_batches)
                 .into_par_iter()
@@ -708,12 +856,14 @@ fn process(args: &ProcessArgs) -> Result<()> {
                         &config_arc,
                         &round_genome,
                         &round_state,
+                        &mc,
+                        min_addable_cost,
                         batch_size,
                         n_batches > 1 && i + 1 == n_batches,
                         tx_local,
                     )
                 })
-                .collect::<Vec<BatchResult>>()
+                .collect::<Vec<BatchResult<G>>>()
         });
 
         let mut should_quit = false;
@@ -723,25 +873,19 @@ fn process(args: &ProcessArgs) -> Result<()> {
             while let Ok(update) = rx.try_recv() {
                 if update.diff < round_display_diff {
                     round_display_diff = update.diff;
+                    last_display_buf.clone_from(&update.rendered_fb);
                     if let Some(ctx) = &mut sdl_ctx {
-                        for pixel in fb.chunks_exact_mut(3) {
-                            pixel.copy_from_slice(&update.background);
-                        }
-                        draw_genes(&mut fb, width, height, &update.shapes);
-                        let blurred = update.blur.map(|r| apply_blur(&fb, width, height, r));
-                        let display = blurred.as_deref().unwrap_or(&fb);
-                        last_display_buf.clear();
-                        last_display_buf.extend_from_slice(display);
                         if !show_original {
-                            let display_rgb = oklab::image_oklab_to_srgb(display);
-                            let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
+                            let display_rgb = oklab::image_oklab_to_srgb(&update.rendered_fb);
+                            let _ =
+                                ctx.texture.update(None, &display_rgb, (width * 3) as usize);
                             let _ = ctx.canvas.copy(&ctx.texture, None, None);
                             ctx.canvas.present();
                         }
                     }
                     tracing::info!(
                         diff_pct = round_display_diff,
-                        shapes = update.shapes.len(),
+                        shapes = update.shape_count,
                         max_cost = update.max_cost_incremental,
                         generation = update.generation,
                         temperature = update.temperature,
@@ -785,19 +929,15 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 while let Ok(update) = rx.try_recv() {
                     if update.diff < round_display_diff {
                         round_display_diff = update.diff;
+                        last_display_buf.clone_from(&update.rendered_fb);
                         if let Some(ctx) = &mut sdl_ctx {
-                            for pixel in fb.chunks_exact_mut(3) {
-                                pixel.copy_from_slice(&update.background);
-                            }
-                            draw_genes(&mut fb, width, height, &update.shapes);
-                            let blurred = update.blur.map(|r| apply_blur(&fb, width, height, r));
-                            let display = blurred.as_deref().unwrap_or(&fb);
-                            last_display_buf.clear();
-                            last_display_buf.extend_from_slice(display);
                             if !show_original {
-                                let display_rgb = oklab::image_oklab_to_srgb(display);
-                                let _ =
-                                    ctx.texture.update(None, &display_rgb, (width * 3) as usize);
+                                let display_rgb = oklab::image_oklab_to_srgb(&update.rendered_fb);
+                                let _ = ctx.texture.update(
+                                    None,
+                                    &display_rgb,
+                                    (width * 3) as usize,
+                                );
                                 let _ = ctx.canvas.copy(&ctx.texture, None, None);
                                 ctx.canvas.present();
                             }
@@ -813,27 +953,24 @@ fn process(args: &ProcessArgs) -> Result<()> {
         let results = join_handle.join().expect("worker thread panicked");
 
         if should_quit {
-            finalize(
+            finalize_generic(
                 checkpoint_path,
-                &config,
+                config,
                 output_svg,
                 &absbest_genome,
                 &state,
                 print_data_url,
+                &make_checkpoint_genome,
             )?;
             return Ok(());
         }
 
-        // Include the pre-round absbest so it competes on equal footing; if every
-        // batch regressed, this ensures the round ends with no change rather than
-        // silently accepting a worse genome.
         let mut results_sorted = results;
         results_sorted.push(BatchResult {
             best_genome: absbest_genome.clone(),
             state: state.clone(),
         });
 
-        // Sort batches by diff ascending; best is first
         results_sorted.sort_unstable_by(|a, b| {
             a.state
                 .absbestdiff
@@ -841,35 +978,18 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 .unwrap_or(Ordering::Equal)
         });
 
-        // Recombination phase: cross the top-K batch winners
         let top_n = top_k_n.min(results_sorted.len());
         let top = &results_sorted[..top_n];
         let mut best_offspring_diff: Option<f32> = None;
-        let mut best_offspring: Option<ShapeGenome> = None;
-
-        let recombine_config = MutationConfig {
-            width,
-            height,
-            margin: absbest_genome.blur_radius().map_or(0, |r| r.ceil() as i16),
-            mutation_rate: config.mutation_rate.min(1000),
-            use_triangles: config.use_triangles,
-            use_circles: config.use_circles,
-            use_polygons: config.use_polygons,
-            max_polygon_vertices: config.max_shapes * 4,
-        };
+        let mut best_offspring: Option<G> = None;
 
         if top_n >= 2 {
             let mut scratch = vec![0.0f32; (width * height * 3) as usize];
             for i in 0..top.len() {
                 for j in (i + 1)..top.len() {
-                    let raw_child = top[i].best_genome.recombine_configured(
-                        &top[j].best_genome,
-                        &mut rng,
-                        &recombine_config,
-                    );
-                    // Trim to budget before fitness, same as run_batch does for every candidate
+                    let raw_child = recombine_fn(&top[i].best_genome, &mut rng, &top[j].best_genome);
                     let child = if let Some(max_bytes) = config.max_bytes {
-                        trim_genome_to_budget(raw_child, width, height, max_bytes)
+                        raw_child.trim_to_budget(width, height, max_bytes)
                     } else {
                         raw_child
                     };
@@ -882,7 +1002,6 @@ fn process(args: &ProcessArgs) -> Result<()> {
             }
         }
 
-        // Winner is the best batch result, potentially beaten by a recombination offspring
         let batch_winner = results_sorted
             .into_iter()
             .next()
@@ -912,7 +1031,6 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
         tracing::info!(
             diff_pct = state.absbestdiff,
-            shapes = absbest_genome.shapes.len(),
             max_cost = state.max_cost_incremental,
             generation = state.generation,
             temperature = state.temperature,
@@ -920,18 +1038,13 @@ fn process(args: &ProcessArgs) -> Result<()> {
             "round complete"
         );
 
+        // Update SDL with the round-end best
+        absbest_genome.render_to_fb(&mut fb, width, height);
+        let blurred = absbest_genome.blur_radius().map(|r| apply_blur(&fb, width, height, r));
+        let display = blurred.as_deref().unwrap_or(&fb);
+        last_display_buf.clear();
+        last_display_buf.extend_from_slice(display);
         if let Some(ctx) = &mut sdl_ctx {
-            let bg = absbest_genome.background_oklab();
-            for pixel in fb.chunks_exact_mut(3) {
-                pixel.copy_from_slice(&bg);
-            }
-            draw_genes(&mut fb, width, height, &absbest_genome.shapes);
-            let blurred = absbest_genome
-                .blur_radius()
-                .map(|r| apply_blur(&fb, width, height, r));
-            let display = blurred.as_deref().unwrap_or(&fb);
-            last_display_buf.clear();
-            last_display_buf.extend_from_slice(display);
             if !show_original {
                 let display_rgb = oklab::image_oklab_to_srgb(display);
                 let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
@@ -946,13 +1059,14 @@ fn process(args: &ProcessArgs) -> Result<()> {
                 .is_some_and(|n| u64::try_from(state.generation).is_ok_and(|g| g >= n))
                 || args.target_diff.is_some_and(|t| state.absbestdiff <= t);
             if done {
-                finalize(
+                finalize_generic(
                     checkpoint_path,
-                    &config,
+                    config,
                     output_svg,
                     &absbest_genome,
                     &state,
                     print_data_url,
+                    &make_checkpoint_genome,
                 )?;
                 return Ok(());
             }
@@ -960,9 +1074,14 @@ fn process(args: &ProcessArgs) -> Result<()> {
 
         write_svg(
             output_svg,
-            &build_svg_from_genome(&absbest_genome, width, height, false),
+            &absbest_genome.build_svg_output(width, height, false),
         )?;
-        save_binary(checkpoint_path, &config, &state, &absbest_genome)?;
+        save_binary(
+            checkpoint_path,
+            config,
+            &state,
+            &make_checkpoint_genome(&absbest_genome),
+        )?;
     }
 }
 
