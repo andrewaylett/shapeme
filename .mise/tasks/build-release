@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description='Build the release variant of shapeme'
+#MISE outputs='target/release/shapeme'
+#MISE sources=['Cargo.*', 'shapeme/**/*', 'libshapeme/**/*']
+
+cargo build --release

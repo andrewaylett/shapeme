@@ -1,2 +1,22 @@
 [tools]
-rust = "latest"
+rust = "1.96"
+
+[env]
+_.path = ['bin']
+
+[[hooks.enter]]
+shell = "fish"
+script = """
+set -gp fish_complete_path $MISE_PROJECT_ROOT/.mise/completions/fish
+source $MISE_PROJECT_ROOT/.mise/completions/fish/*.fish
+"""
+
+[[hooks.leave]]
+shell = "fish"
+script = """
+set -l idx (contains -i -- $MISE_PROJECT_ROOT/.mise/completions/fish $fish_complete_path)
+and set -e fish_complete_path[$idx]
+for f in $MISE_PROJECT_ROOT/.mise/completions/fish/*.fish
+    complete -e -c (basename -s .fish $f)
+end
+"""

@@ -2,12 +2,13 @@
 #![forbid(unsafe_code)]
 
 use std::cmp::Ordering;
-use std::fs;
+use std::{fs, io};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result};
-use clap::{Args as ClapArgs, Parser, Subcommand};
+use clap::{Args as ClapArgs, Command as ClapCommand, Parser, Subcommand, CommandFactory};
+use clap_complete::{generate, Generator, Shell};
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -52,6 +53,8 @@ enum Command {
     Setup(SetupArgs),
     /// Load a checkpoint and run the annealing optimiser.
     Process(ProcessArgs),
+    /// Generate completions
+    Completions(CompletionsArgs),
 }
 
 /// How `setup` should initialise the starting genome.
@@ -133,6 +136,11 @@ struct ProcessArgs {
     /// Genomes from top-K batches are recombined each round (set 1 to disable)
     #[arg(long, default_value = "3")]
     top_k: usize,
+}
+
+#[derive(ClapArgs, Debug)]
+struct CompletionsArgs {
+    shell: Shell,
 }
 
 /// Configuration embedded in the checkpoint by `setup`. Carries everything `process` needs
@@ -1125,9 +1133,17 @@ fn main() -> Result<()> {
         Level::INFO
     };
     tracing_subscriber::fmt().with_max_level(level).init();
-
-    match args.command {
-        Command::Setup(setup_args) => setup(&setup_args),
-        Command::Process(process_args) => process(&process_args),
+    
+    match &args.command {
+        (Command::Setup(setup_args)) => setup(&setup_args),
+        (Command::Process(process_args)) => process(&process_args),
+        Command::Completions(completions_args) => {
+            fn print_completions<G: Generator>(generator: G, cmd: &mut ClapCommand) {
+                generate(generator, cmd, cmd.get_name().to_string(), &mut io::stdout());
+            }
+            
+            let mut cmd = Args::command_for_update();
+            Ok(print_completions(completions_args.shell, &mut cmd))
+        },
     }
 }

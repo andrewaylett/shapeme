@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Run the release build of shapeme"
+#MISE dir="{{cwd}}"
+#MISE env={PROJECT_DIR = "{{ config_root }}"}
+#MISE depends=['build-release']
+
+"${PROJECT_DIR}/target/release/shapeme" "$@"

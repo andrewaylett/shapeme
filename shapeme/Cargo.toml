@@ -19,7 +19,8 @@ rayon = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 tracing = { workspace = true }
-sdl2 = { version = "0.37", features = ["bundled", "unsafe_textures"] }
+sdl2 = { version = "0.37", features = ["bundled", "static-link", "unsafe_textures"] }
 clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4" }
 anyhow = "1"
 tracing-subscriber = "0.3"
