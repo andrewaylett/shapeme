@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::annealing::AnnealingState;
 use crate::gene::{BackgroundGene, BlurGene, Gene, MutationConfig, ShapeGene};
 use crate::render::{apply_blur, compute_diff, draw_genes};
-use crate::svg::build_svg_from_genome;
+use crate::svg::{build_svg_from_genome, build_svg_react_from_genome};
 
 /// A complete candidate solution produced by combining genes.
 pub trait Genome: Clone + Send + Sync {
@@ -57,6 +57,13 @@ pub trait Genome: Clone + Send + Sync {
     /// Build an SVG string representing this genome.
     #[must_use]
     fn build_svg_output(&self, width: u32, height: u32, compact: bool) -> String;
+
+    /// Build a React JSX-compatible SVG string representing this genome.
+    ///
+    /// `filter_id` becomes the `<filter id="...">` attribute (typically the first char of the
+    /// SVG output filename).
+    #[must_use]
+    fn build_react_output(&self, width: u32, height: u32, filter_id: char) -> String;
 
     /// Optional evolved Gaussian blur radius (sigma in pixels).
     #[must_use]
@@ -195,6 +202,10 @@ impl Genome for ShapeGenome {
 
     fn build_svg_output(&self, width: u32, height: u32, compact: bool) -> String {
         build_svg_from_genome(self, width, height, compact)
+    }
+
+    fn build_react_output(&self, width: u32, height: u32, filter_id: char) -> String {
+        build_svg_react_from_genome(self, width, height, filter_id)
     }
 
     fn blur_radius(&self) -> Option<f32> {

@@ -303,8 +303,251 @@ fn push_grid_cell(s: &mut String, grid: &GridGenome, row: usize, col: usize, com
         write!(s, "<polygon points='{pts}' fill='#{r:02x}{g:02x}{b:02x}'/>")
             .expect("String write is infallible");
     } else {
-        writeln!(s, "<polygon points=\"{pts}\" fill=\"#{r:02x}{g:02x}{b:02x}\"/>")
+        writeln!(
+            s,
+            "<polygon points=\"{pts}\" fill=\"#{r:02x}{g:02x}{b:02x}\"/>"
+        )
+        .expect("String write is infallible");
+    }
+}
+
+/// Build a React JSX-compatible SVG string from shape genes.
+///
+/// Colours use 8-digit hex RGBA (`fill="#rrggbbaa"`) for semi-transparent shapes; fully
+/// opaque shapes (alpha == 100) use 6-digit `fill="#rrggbb"`.
+/// The outer `<svg>` uses `width="100%"` `height="100%"` for responsive embedding.
+/// `filter_id` is used as the `<filter id>` (typically the first char of the output filename).
+#[must_use]
+pub fn build_svg_react(
+    genes: &[ShapeGene],
+    width: u32,
+    height: u32,
+    blur_radius: Option<f32>,
+    background: [f32; 3],
+    filter_id: char,
+) -> String {
+    let [bg_r, bg_g, bg_b] = oklab::oklab_to_srgb_u8(background);
+    let mut s = String::new();
+
+    writeln!(s, "<svg").expect("String write is infallible");
+    writeln!(s, "  viewBox=\"0 0 {width} {height}\"").expect("String write is infallible");
+    writeln!(s, "  preserveAspectRatio=\"xMidYMid slice\"").expect("String write is infallible");
+    writeln!(s, "  width=\"100%\"").expect("String write is infallible");
+    writeln!(s, "  height=\"100%\"").expect("String write is infallible");
+    writeln!(s, ">").expect("String write is infallible");
+
+    if let Some(r) = blur_radius {
+        writeln!(s, "  <defs>").expect("String write is infallible");
+        writeln!(s, "    <filter id=\"{filter_id}\">").expect("String write is infallible");
+        writeln!(s, "      <feGaussianBlur stdDeviation=\"{r}\" />")
             .expect("String write is infallible");
+        writeln!(s, "    </filter>").expect("String write is infallible");
+        writeln!(s, "  </defs>").expect("String write is infallible");
+        writeln!(s, "  <g filter=\"url(#{filter_id})\">").expect("String write is infallible");
+    }
+
+    let inner = if blur_radius.is_some() { "    " } else { "  " };
+    writeln!(
+        s,
+        "{inner}<rect width=\"{width}\" height=\"{height}\" fill=\"#{bg_r:02x}{bg_g:02x}{bg_b:02x}\" />"
+    )
+    .expect("String write is infallible");
+
+    for gene in genes {
+        push_gene_react(&mut s, gene, inner);
+    }
+
+    if blur_radius.is_some() {
+        writeln!(s, "  </g>").expect("String write is infallible");
+    }
+    s.push_str("</svg>\n");
+    s
+}
+
+fn alpha_hex(a: u8) -> String {
+    if a >= 100 {
+        String::new()
+    } else {
+        format!("{:02x}", (f32::from(a) / 100.0 * 255.0).round() as u8)
+    }
+}
+
+fn push_gene_react(s: &mut String, gene: &ShapeGene, indent: &str) {
+    match gene {
+        ShapeGene::Triangle(TriangleGene {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+            oklab,
+            alpha,
+            ..
+        }) => {
+            let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
+            let ah = alpha_hex(*alpha);
+            let single = format!(
+                "{indent}<polygon points=\"{x1},{y1} {x2},{y2} {x3},{y3}\" fill=\"#{r:02x}{g:02x}{b:02x}{ah}\" />"
+            );
+            if single.len() <= 80 {
+                writeln!(s, "{single}").expect("String write is infallible");
+            } else {
+                writeln!(s, "{indent}<polygon").expect("String write is infallible");
+                writeln!(
+                    s,
+                    "{indent}  points=\"{x1},{y1} {x2},{y2} {x3},{y3}\""
+                )
+                .expect("String write is infallible");
+                writeln!(s, "{indent}  fill=\"#{r:02x}{g:02x}{b:02x}{ah}\"")
+                    .expect("String write is infallible");
+                writeln!(s, "{indent}/>").expect("String write is infallible");
+            }
+        }
+        ShapeGene::Circle(CircleGene {
+            cx,
+            cy,
+            radius,
+            oklab,
+            alpha,
+            ..
+        }) => {
+            let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
+            let ah = alpha_hex(*alpha);
+            let single = format!(
+                "{indent}<circle cx=\"{cx}\" cy=\"{cy}\" r=\"{radius}\" fill=\"#{r:02x}{g:02x}{b:02x}{ah}\" />"
+            );
+            if single.len() <= 80 {
+                writeln!(s, "{single}").expect("String write is infallible");
+            } else {
+                writeln!(s, "{indent}<circle").expect("String write is infallible");
+                writeln!(s, "{indent}  cx=\"{cx}\"").expect("String write is infallible");
+                writeln!(s, "{indent}  cy=\"{cy}\"").expect("String write is infallible");
+                writeln!(s, "{indent}  r=\"{radius}\"").expect("String write is infallible");
+                writeln!(s, "{indent}  fill=\"#{r:02x}{g:02x}{b:02x}{ah}\"")
+                    .expect("String write is infallible");
+                writeln!(s, "{indent}/>").expect("String write is infallible");
+            }
+        }
+        ShapeGene::Polygon(PolygonGene {
+            vertices,
+            oklab,
+            alpha,
+            ..
+        }) => {
+            let [r, g, b] = oklab::oklab_to_srgb_u8(*oklab);
+            let ah = alpha_hex(*alpha);
+            let pts: String = vertices
+                .iter()
+                .map(|(x, y)| format!("{x},{y}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let single = format!(
+                "{indent}<polygon points=\"{pts}\" fill=\"#{r:02x}{g:02x}{b:02x}{ah}\" />"
+            );
+            if single.len() <= 80 {
+                writeln!(s, "{single}").expect("String write is infallible");
+            } else {
+                writeln!(s, "{indent}<polygon").expect("String write is infallible");
+                writeln!(s, "{indent}  points=\"{pts}\"").expect("String write is infallible");
+                writeln!(s, "{indent}  fill=\"#{r:02x}{g:02x}{b:02x}{ah}\"")
+                    .expect("String write is infallible");
+                writeln!(s, "{indent}/>").expect("String write is infallible");
+            }
+        }
+    }
+}
+
+/// Build a React JSX SVG string from a `ShapeGenome`, respecting z-order.
+#[must_use]
+pub fn build_svg_react_from_genome(
+    genome: &ShapeGenome,
+    width: u32,
+    height: u32,
+    filter_id: char,
+) -> String {
+    let genes: Vec<&ShapeGene> = genome.sorted_genes();
+    let owned: Vec<ShapeGene> = genes.into_iter().cloned().collect();
+    build_svg_react(
+        &owned,
+        width,
+        height,
+        genome.blur_radius(),
+        genome.background_oklab(),
+        filter_id,
+    )
+}
+
+/// Build a React JSX SVG string from a `GridGenome`.
+///
+/// Grid cells are fully opaque, so no alpha suffix is emitted.
+#[must_use]
+pub fn build_svg_react_from_grid(
+    grid: &GridGenome,
+    width: u32,
+    height: u32,
+    filter_id: char,
+) -> String {
+    let mut s = String::new();
+
+    writeln!(s, "<svg").expect("String write is infallible");
+    writeln!(s, "  viewBox=\"0 0 {width} {height}\"").expect("String write is infallible");
+    writeln!(s, "  preserveAspectRatio=\"xMidYMid slice\"").expect("String write is infallible");
+    writeln!(s, "  width=\"100%\"").expect("String write is infallible");
+    writeln!(s, "  height=\"100%\"").expect("String write is infallible");
+    writeln!(s, ">").expect("String write is infallible");
+
+    if let Some(r) = grid.blur_radius() {
+        writeln!(s, "  <defs>").expect("String write is infallible");
+        writeln!(s, "    <filter id=\"{filter_id}\">").expect("String write is infallible");
+        writeln!(s, "      <feGaussianBlur stdDeviation=\"{r}\" />")
+            .expect("String write is infallible");
+        writeln!(s, "    </filter>").expect("String write is infallible");
+        writeln!(s, "  </defs>").expect("String write is infallible");
+        writeln!(s, "  <g filter=\"url(#{filter_id})\">").expect("String write is infallible");
+    }
+
+    let inner = if grid.blur_radius().is_some() { "    " } else { "  " };
+    for row in 0..grid.rows as usize {
+        for col in 0..grid.cols as usize {
+            push_grid_cell_react(&mut s, grid, row, col, inner);
+        }
+    }
+
+    if grid.blur_radius().is_some() {
+        writeln!(s, "  </g>").expect("String write is infallible");
+    }
+    s.push_str("</svg>\n");
+    s
+}
+
+fn push_grid_cell_react(
+    s: &mut String,
+    grid: &GridGenome,
+    row: usize,
+    col: usize,
+    indent: &str,
+) {
+    let cols_p1 = grid.cols as usize + 1;
+    let tl = grid.points[row * cols_p1 + col];
+    let tr = grid.points[row * cols_p1 + col + 1];
+    let br = grid.points[(row + 1) * cols_p1 + col + 1];
+    let bl = grid.points[(row + 1) * cols_p1 + col];
+    let color = grid.colors[row * grid.cols as usize + col];
+    let [r, g, b] = oklab::oklab_to_srgb_u8(color);
+    let pts = format!(
+        "{},{} {},{} {},{} {},{}",
+        tl.0, tl.1, tr.0, tr.1, br.0, br.1, bl.0, bl.1
+    );
+    let single = format!("{indent}<polygon points=\"{pts}\" fill=\"#{r:02x}{g:02x}{b:02x}\" />");
+    if single.len() <= 80 {
+        writeln!(s, "{single}").expect("String write is infallible");
+    } else {
+        writeln!(s, "{indent}<polygon").expect("String write is infallible");
+        writeln!(s, "{indent}  points=\"{pts}\"").expect("String write is infallible");
+        writeln!(s, "{indent}  fill=\"#{r:02x}{g:02x}{b:02x}\"")
+            .expect("String write is infallible");
+        writeln!(s, "{indent}/>").expect("String write is infallible");
     }
 }
 

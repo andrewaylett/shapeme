@@ -18,7 +18,7 @@ use crate::gene::{BlurGene, Gene, MutationConfig};
 use crate::genome::Genome;
 use crate::render::{apply_blur, compute_diff, draw_triangle};
 use crate::shapes::{nudge_oklab, rand_between, random_oklab_color};
-use crate::svg::build_svg_from_grid;
+use crate::svg::{build_svg_from_grid, build_svg_react_from_grid};
 
 /// A shared-vertex quad-mesh genome covering the entire canvas.
 ///
@@ -45,13 +45,7 @@ impl GridGenome {
     /// Points are placed at `x[c] = round(-m + c * (W - 1 + 2m) / cols)` and the y equivalent.
     /// `blur_radius` — if given — sets the initial blur and determines the canvas margin.
     #[must_use]
-    pub fn new(
-        cols: u16,
-        rows: u16,
-        width: u32,
-        height: u32,
-        blur_radius: Option<f32>,
-    ) -> Self {
+    pub fn new(cols: u16, rows: u16, width: u32, height: u32, blur_radius: Option<f32>) -> Self {
         let m = blur_radius.map_or(0, |r| r.ceil() as i32);
         let w = width as i32;
         let h = height as i32;
@@ -186,17 +180,8 @@ fn draw_sorted_triangle(
         }
     }
     draw_triangle(
-        fb,
-        width,
-        height,
-        verts[0].0,
-        verts[0].1,
-        verts[1].0,
-        verts[1].1,
-        verts[2].0,
-        verts[2].1,
-        color,
-        1.0,
+        fb, width, height, verts[0].0, verts[0].1, verts[1].0, verts[1].1, verts[2].0, verts[2].1,
+        color, 1.0,
     );
 }
 
@@ -212,6 +197,10 @@ impl Genome for GridGenome {
 
     fn build_svg_output(&self, width: u32, height: u32, compact: bool) -> String {
         build_svg_from_grid(self, width, height, compact)
+    }
+
+    fn build_react_output(&self, width: u32, height: u32, filter_id: char) -> String {
+        build_svg_react_from_grid(self, width, height, filter_id)
     }
 
     fn blur_radius(&self) -> Option<f32> {
@@ -255,11 +244,17 @@ impl Genome for GridGenome {
             // Move a random point: 80% small nudge (±5), 20% large nudge (±20)
             if !points.is_empty() {
                 let idx = rng.random_range(0..points.len());
-                let delta = if rng.random_range(0..5u32) == 0 { 20 } else { 5 };
-                points[idx].0 =
-                    points[idx].0.saturating_add(rand_between(rng, -delta, delta) as i16);
-                points[idx].1 =
-                    points[idx].1.saturating_add(rand_between(rng, -delta, delta) as i16);
+                let delta = if rng.random_range(0..5u32) == 0 {
+                    20
+                } else {
+                    5
+                };
+                points[idx].0 = points[idx]
+                    .0
+                    .saturating_add(rand_between(rng, -delta, delta) as i16);
+                points[idx].1 = points[idx]
+                    .1
+                    .saturating_add(rand_between(rng, -delta, delta) as i16);
             }
         } else if roll < 90 {
             // Nudge a random cell's colour
@@ -278,7 +273,11 @@ impl Genome for GridGenome {
             // Nudge or toggle blur
             blur = blur.map_or(Some(BlurGene { radius: 0.5 }), |b| {
                 let mutated = b.mutate(rng, config);
-                if mutated.radius < 0.1 { None } else { Some(mutated) }
+                if mutated.radius < 0.1 {
+                    None
+                } else {
+                    Some(mutated)
+                }
             });
         }
 
@@ -304,7 +303,11 @@ impl Genome for GridGenome {
         let blur = match (&self.blur, &other.blur) {
             (Some(a), Some(b)) => Some(a.recombine(b, rng)),
             (Some(b), None) | (None, Some(b)) => {
-                if rng.random_bool(0.5) { Some(b.clone()) } else { None }
+                if rng.random_bool(0.5) {
+                    Some(b.clone())
+                } else {
+                    None
+                }
             }
             (None, None) => None,
         };
@@ -369,7 +372,10 @@ mod tests {
         g.normalize(64, 64, margin);
         let (x, y) = g.points[0 * 3 + 1];
         assert_eq!(y, -margin, "top edge y must be pinned");
-        assert!(x != top_mid.0 || x.clamp(-margin, 63 + margin) == x, "x should be clamped");
+        assert!(
+            x != top_mid.0 || x.clamp(-margin, 63 + margin) == x,
+            "x should be clamped"
+        );
     }
 
     #[test]

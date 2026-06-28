@@ -2,13 +2,13 @@
 #![forbid(unsafe_code)]
 
 use std::cmp::Ordering;
-use std::{fs, io};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
+use std::{fs, io};
 
 use anyhow::{Context, Result};
-use clap::{Args as ClapArgs, Command as ClapCommand, Parser, Subcommand, CommandFactory};
-use clap_complete::{generate, Generator, Shell};
+use clap::{Args as ClapArgs, Command as ClapCommand, CommandFactory, Parser, Subcommand};
+use clap_complete::{Generator, Shell, generate};
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -78,12 +78,18 @@ struct SetupArgs {
     /// Output SVG path (stored in checkpoint; used by `process`)
     #[arg(long)]
     output_svg: PathBuf,
-    #[arg(long, default_value = "1")]
-    use_triangles: u8,
-    #[arg(long, default_value = "0")]
-    use_circles: u8,
-    #[arg(long, default_value = "0")]
-    use_polygons: u8,
+    #[arg(long)]
+    use_triangles: bool,
+    #[arg(long)]
+    use_circles: bool,
+    #[arg(long)]
+    use_polygons: bool,
+    #[arg(long, conflicts_with = "use-triangles")]
+    no_use_triangles: bool,
+    #[arg(long, conflicts_with = "use-circles")]
+    no_use_circles: bool,
+    #[arg(long, conflicts_with = "use-polygons")]
+    no_use_polygons: bool,
     #[arg(long, default_value = "64")]
     max_shapes: usize,
     #[arg(long, default_value = "1")]
@@ -121,6 +127,9 @@ struct ProcessArgs {
     /// Print a data URL to stdout on exit
     #[arg(long)]
     data_url: bool,
+    /// Print React JSX SVG to stdout on exit
+    #[arg(long)]
+    react: bool,
     /// Re-initialise shapes and annealing state, keeping stored config and image
     #[arg(long)]
     restart: bool,
@@ -290,6 +299,7 @@ fn finalize_generic<G: Genome>(
     genome: &G,
     state: &AnnealingState,
     print_data_url: bool,
+    print_react: bool,
     make_checkpoint_genome: impl Fn(&G) -> CheckpointGenome,
 ) -> Result<()> {
     write_svg(
@@ -302,6 +312,17 @@ fn finalize_generic<G: Genome>(
         let compact = genome.build_svg_output(config.width, config.height, true);
         println!("{}", svg_to_data_url(&compact));
     }
+    if print_react {
+        let filter_id = output_svg
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|s| s.chars().next())
+            .unwrap_or('f');
+        println!(
+            "{}",
+            genome.build_react_output(config.width, config.height, filter_id)
+        );
+    }
     Ok(())
 }
 
@@ -312,17 +333,17 @@ fn finalize_generic<G: Genome>(
 fn setup(args: &SetupArgs) -> Result<()> {
     let is_grid = matches!(args.start, StartMode::Grid);
 
-    let use_triangles = args.use_triangles != 0;
+    let use_triangles = !args.no_use_triangles;
     // --start circles forces circles on even if --use-circles was not set
     let use_circles = if matches!(args.start, StartMode::Circles) {
-        if args.use_circles == 0 {
+        if !args.use_circles || args.no_use_circles {
             tracing::warn!("--start circles forces --use-circles on");
         }
         true
     } else {
-        args.use_circles != 0
+        args.use_circles
     };
-    let use_polygons = args.use_polygons != 0;
+    let use_polygons = args.use_polygons;
 
     // Grid mode bypasses the shape-type requirement
     if !is_grid && !use_triangles && !use_circles && !use_polygons {
@@ -350,8 +371,10 @@ fn setup(args: &SetupArgs) -> Result<()> {
                 blur: None,
                 background: BackgroundGene::default(),
             });
-            let mut state =
-                AnnealingState::new(args.max_shapes * TRIANGLE_COST, args.initial_shapes * TRIANGLE_COST);
+            let mut state = AnnealingState::new(
+                args.max_shapes * TRIANGLE_COST,
+                args.initial_shapes * TRIANGLE_COST,
+            );
             state.blur_radius = args.blur_radius;
             (genome, state, args.initial_shapes)
         }
@@ -432,7 +455,14 @@ fn setup(args: &SetupArgs) -> Result<()> {
                 }
             }
             let shape_count = shapes.len();
-            tracing::info!(count = shape_count, cols, rows, radius, blur = blur_r, "circle grid initialised");
+            tracing::info!(
+                count = shape_count,
+                cols,
+                rows,
+                radius,
+                blur = blur_r,
+                "circle grid initialised"
+            );
             let genome = ShapeGenome {
                 shapes,
                 blur: Some(BlurGene { radius: blur_r }),
@@ -603,7 +633,9 @@ fn run_batch<G: Genome>(
         };
 
         let blurred_target = if let Some(r) = effective.blur_radius() {
-            let cache_miss = blurred_target_cache.as_ref().is_none_or(|(cr, _)| (cr - r).abs() > 1e-4);
+            let cache_miss = blurred_target_cache
+                .as_ref()
+                .is_none_or(|(cr, _)| (cr - r).abs() > 1e-4);
             if cache_miss {
                 blurred_target_cache = Some((r, apply_blur(&config.image, width, height, r)));
             }
@@ -628,7 +660,9 @@ fn run_batch<G: Genome>(
 
                 // Render the new best for display (geometry + blur)
                 effective.render_to_fb(&mut fb, width, height);
-                let blurred = effective.blur_radius().map(|r| apply_blur(&fb, width, height, r));
+                let blurred = effective
+                    .blur_radius()
+                    .map(|r| apply_blur(&fb, width, height, r));
                 let display_fb = blurred.unwrap_or_else(|| fb.clone());
 
                 let _ = tx.send(DisplayUpdate {
@@ -899,8 +933,7 @@ where
                     if let Some(ctx) = &mut sdl_ctx {
                         if !show_original {
                             let display_rgb = oklab::image_oklab_to_srgb(&update.rendered_fb);
-                            let _ =
-                                ctx.texture.update(None, &display_rgb, (width * 3) as usize);
+                            let _ = ctx.texture.update(None, &display_rgb, (width * 3) as usize);
                             let _ = ctx.canvas.copy(&ctx.texture, None, None);
                             ctx.canvas.present();
                         }
@@ -955,11 +988,8 @@ where
                         if let Some(ctx) = &mut sdl_ctx {
                             if !show_original {
                                 let display_rgb = oklab::image_oklab_to_srgb(&update.rendered_fb);
-                                let _ = ctx.texture.update(
-                                    None,
-                                    &display_rgb,
-                                    (width * 3) as usize,
-                                );
+                                let _ =
+                                    ctx.texture.update(None, &display_rgb, (width * 3) as usize);
                                 let _ = ctx.canvas.copy(&ctx.texture, None, None);
                                 ctx.canvas.present();
                             }
@@ -982,6 +1012,7 @@ where
                 &absbest_genome,
                 &state,
                 print_data_url,
+                args.react,
                 &make_checkpoint_genome,
             )?;
             return Ok(());
@@ -1010,7 +1041,8 @@ where
             let mut blurred_target_cache: Option<(f32, Vec<f32>)> = None;
             for i in 0..top.len() {
                 for j in (i + 1)..top.len() {
-                    let raw_child = recombine_fn(&top[i].best_genome, &mut rng, &top[j].best_genome);
+                    let raw_child =
+                        recombine_fn(&top[i].best_genome, &mut rng, &top[j].best_genome);
                     let child = if let Some(max_bytes) = config.max_bytes {
                         raw_child.trim_to_budget(width, height, max_bytes)
                     } else {
@@ -1077,7 +1109,9 @@ where
 
         // Update SDL with the round-end best
         absbest_genome.render_to_fb(&mut fb, width, height);
-        let blurred = absbest_genome.blur_radius().map(|r| apply_blur(&fb, width, height, r));
+        let blurred = absbest_genome
+            .blur_radius()
+            .map(|r| apply_blur(&fb, width, height, r));
         let display = blurred.as_deref().unwrap_or(&fb);
         last_display_buf.clear();
         last_display_buf.extend_from_slice(display);
@@ -1103,6 +1137,7 @@ where
                     &absbest_genome,
                     &state,
                     print_data_url,
+                    args.react,
                     &make_checkpoint_genome,
                 )?;
                 return Ok(());
@@ -1133,17 +1168,22 @@ fn main() -> Result<()> {
         Level::INFO
     };
     tracing_subscriber::fmt().with_max_level(level).init();
-    
+
     match &args.command {
-        (Command::Setup(setup_args)) => setup(&setup_args),
-        (Command::Process(process_args)) => process(&process_args),
+        Command::Setup(setup_args) => setup(&setup_args),
+        Command::Process(process_args) => process(&process_args),
         Command::Completions(completions_args) => {
             fn print_completions<G: Generator>(generator: G, cmd: &mut ClapCommand) {
-                generate(generator, cmd, cmd.get_name().to_string(), &mut io::stdout());
+                generate(
+                    generator,
+                    cmd,
+                    cmd.get_name().to_string(),
+                    &mut io::stdout(),
+                );
             }
-            
+
             let mut cmd = Args::command_for_update();
             Ok(print_completions(completions_args.shell, &mut cmd))
-        },
+        }
     }
 }
