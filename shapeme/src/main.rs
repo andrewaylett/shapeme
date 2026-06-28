@@ -91,9 +91,10 @@ struct SetupArgs {
     /// Initial Gaussian blur sigma; will be evolved during processing
     #[arg(long)]
     blur_radius: Option<f32>,
-    /// Also blur the target image with the candidate's blur radius before computing the diff
+    /// Blur the target image at this fraction of the candidate's blur radius before diff
+    /// (e.g. 0.5 = half-blur, 1.0 = full-blur); omit to use the sharp reference
     #[arg(long)]
-    blur_target: bool,
+    blur_target_factor: Option<f32>,
     /// Constrain the data URL to at most N bytes (enforced each generation)
     #[arg(long)]
     max_bytes: Option<usize>,
@@ -163,8 +164,8 @@ struct StoredConfig {
     initial_shapes: usize,
     /// User-supplied starting blur sigma; used to reset blur on `process --restart`.
     initial_blur_radius: Option<f32>,
-    /// When true, the target image is blurred to match the candidate's blur before diff.
-    blur_target: bool,
+    /// When set, the target is blurred at this fraction of the candidate's blur radius before diff.
+    blur_target_factor: Option<f32>,
 }
 
 /// Genome variant stored in the checkpoint.
@@ -513,7 +514,7 @@ fn setup(args: &SetupArgs) -> Result<()> {
         max_shapes,
         initial_shapes: config_initial_shapes,
         initial_blur_radius: args.blur_radius,
-        blur_target: args.blur_target,
+        blur_target_factor: args.blur_target_factor,
     };
 
     save_binary(&args.checkpoint, &config, &state, &initial_genome)?;
@@ -550,14 +551,13 @@ fn effective_target<'a>(
     config: &'a StoredConfig,
     cache: &'a mut Option<(f32, Vec<f32>)>,
 ) -> &'a [f32] {
-    if config.blur_target {
-        if let Some(r) = blur_radius {
-            let stale = cache.as_ref().is_none_or(|(cr, _)| (cr - r).abs() > 1e-4);
-            if stale {
-                *cache = Some((r, apply_blur(&config.image, config.width, config.height, r)));
-            }
-            return &cache.as_ref().expect("cache was just populated").1;
+    if let (Some(factor), Some(r)) = (config.blur_target_factor, blur_radius) {
+        let target_r = r * factor;
+        let stale = cache.as_ref().is_none_or(|(cr, _)| (cr - target_r).abs() > 1e-4);
+        if stale {
+            *cache = Some((target_r, apply_blur(&config.image, config.width, config.height, target_r)));
         }
+        return &cache.as_ref().expect("cache was just populated").1;
     }
     &config.image
 }
