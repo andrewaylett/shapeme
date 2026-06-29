@@ -70,6 +70,10 @@ enum StartMode {
 }
 
 #[derive(ClapArgs, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "clap CLI flags; two-variant enums don't compose with clap derive"
+)]
 struct SetupArgs {
     /// Binary checkpoint file to create or overwrite
     checkpoint: PathBuf,
@@ -112,6 +116,10 @@ struct SetupArgs {
 }
 
 #[derive(ClapArgs, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "clap CLI flags; two-variant enums don't compose with clap derive"
+)]
 struct ProcessArgs {
     /// Binary checkpoint file (must exist; created by `setup`)
     checkpoint: PathBuf,
@@ -292,6 +300,10 @@ fn init_sdl(width: u32, height: u32) -> Result<SdlCtx> {
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "generic finaliser needs genome, state, config, paths, and output flags — splitting further adds indirection without clarity"
+)]
 fn finalize_generic<G: Genome>(
     checkpoint: &Path,
     config: &StoredConfig,
@@ -1170,8 +1182,8 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(level).init();
 
     match &args.command {
-        Command::Setup(setup_args) => setup(&setup_args),
-        Command::Process(process_args) => process(&process_args),
+        Command::Setup(setup_args) => setup(setup_args),
+        Command::Process(process_args) => process(process_args),
         Command::Completions(completions_args) => {
             fn print_completions<G: Generator>(generator: G, cmd: &mut ClapCommand) {
                 generate(
@@ -1183,7 +1195,8 @@ fn main() -> Result<()> {
             }
 
             let mut cmd = Args::command_for_update();
-            Ok(print_completions(completions_args.shell, &mut cmd))
+            print_completions(completions_args.shell, &mut cmd);
+            Ok(())
         }
     }
 }

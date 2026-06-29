@@ -394,11 +394,8 @@ fn push_gene_react(s: &mut String, gene: &ShapeGene, indent: &str) {
                 writeln!(s, "{single}").expect("String write is infallible");
             } else {
                 writeln!(s, "{indent}<polygon").expect("String write is infallible");
-                writeln!(
-                    s,
-                    "{indent}  points=\"{x1},{y1} {x2},{y2} {x3},{y3}\""
-                )
-                .expect("String write is infallible");
+                writeln!(s, "{indent}  points=\"{x1},{y1} {x2},{y2} {x3},{y3}\"")
+                    .expect("String write is infallible");
                 writeln!(s, "{indent}  fill=\"#{r:02x}{g:02x}{b:02x}{ah}\"")
                     .expect("String write is infallible");
                 writeln!(s, "{indent}/>").expect("String write is infallible");
@@ -442,9 +439,8 @@ fn push_gene_react(s: &mut String, gene: &ShapeGene, indent: &str) {
                 .map(|(x, y)| format!("{x},{y}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let single = format!(
-                "{indent}<polygon points=\"{pts}\" fill=\"#{r:02x}{g:02x}{b:02x}{ah}\" />"
-            );
+            let single =
+                format!("{indent}<polygon points=\"{pts}\" fill=\"#{r:02x}{g:02x}{b:02x}{ah}\" />");
             if single.len() <= 80 {
                 writeln!(s, "{single}").expect("String write is infallible");
             } else {
@@ -507,7 +503,11 @@ pub fn build_svg_react_from_grid(
         writeln!(s, "  <g filter=\"url(#{filter_id})\">").expect("String write is infallible");
     }
 
-    let inner = if grid.blur_radius().is_some() { "    " } else { "  " };
+    let inner = if grid.blur_radius().is_some() {
+        "    "
+    } else {
+        "  "
+    };
     for row in 0..grid.rows as usize {
         for col in 0..grid.cols as usize {
             push_grid_cell_react(&mut s, grid, row, col, inner);
@@ -521,13 +521,7 @@ pub fn build_svg_react_from_grid(
     s
 }
 
-fn push_grid_cell_react(
-    s: &mut String,
-    grid: &GridGenome,
-    row: usize,
-    col: usize,
-    indent: &str,
-) {
+fn push_grid_cell_react(s: &mut String, grid: &GridGenome, row: usize, col: usize, indent: &str) {
     let cols_p1 = grid.cols as usize + 1;
     let tl = grid.points[row * cols_p1 + col];
     let tr = grid.points[row * cols_p1 + col + 1];
