@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
-    - uses: andrewaylett/pre-commit-action@v4.3.0-5
+    - uses: andrewaylett/pre-commit-action@06e6910110806ba43a3411daff9662680025606c # v4.3.0-38
 
   check:
     runs-on: ubuntu-latest
