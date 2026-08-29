@@ -50,3 +50,4 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
 tracing = "0.1"
+libshapeme = { version = "0.1.0", path = "./libshapeme" }

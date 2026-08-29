@@ -12,7 +12,7 @@ description = "Approximate images with triangles/circles via simulated annealing
 workspace = true
 
 [dependencies]
-libshapeme = { path = "../libshapeme" }
+libshapeme = { workspace = true }
 image = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }

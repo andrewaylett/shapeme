@@ -584,7 +584,6 @@ dependencies = [
  "bincode",
  "image",
  "rand",
- "rayon",
  "serde",
  "tracing",
 ]
