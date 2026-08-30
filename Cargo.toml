@@ -45,7 +45,7 @@ redundant_pub_crate      = "allow"  # pub(crate) preferred for crate-internal it
 
 [workspace.dependencies]
 image = "0.25"
-rand = "0.9"
+rand = "0.10"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
